@@ -1,0 +1,22 @@
+# Kernel build artifacts
+*.o
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+*.cmd
+.*.cmd
+.*.o.cmd
+Module.symvers
+modules.order
+.module-common.o
+.tmp_versions/
+
+# Editor files
+*.swp
+*~
+.vscode/
+
+# Claude Code
+.claude/
+CLAUDE.md
