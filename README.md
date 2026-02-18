@@ -1,11 +1,33 @@
 # RTL8188EU Minimal USB WiFi Driver
 
-## Overview
-A clean-room Linux kernel driver for the Realtek RTL8188EU USB WiFi adapter (TP-Link TL-WN722N v2/v3). Implements monitor mode with continuous packet reception.
+> **This driver is under active development and is not ready for general use.**
+> It may crash your kernel, disconnect your USB device, or behave unpredictably.
+> Do not use this on a production system.
 
-**Version:** v0.33 (Feb 17, 2026)
+## What Works
+
+- USB device detection and firmware download
+- Network interface creation (monitor mode only)
+- TX path (packet transmission)
+- Continuous RX (packet reception — 10+ packets/session)
+- PHY/RF initialization with IQK calibration
+- Clean module load/unload (no kernel panics)
+
+## What Doesn't Work Yet
+
+- Station mode (no connecting to WiFi networks)
+- Channel hopping (fixed to channel 6)
+- Packet capture with monitor mode tools
+- Hardware encryption
+- Power management
+
+## Overview
+
+A from-scratch Linux kernel driver for the Realtek RTL8188EU USB WiFi adapter (TP-Link TL-WN722N v2/v3). Implements monitor mode with continuous packet reception.
+
+**Version:** v0.35 (Feb 18, 2026)
 **Target:** USB ID 2357:010c, Kernel 6.17+
-**Status:** Continuous RX working (10+ callbacks/session), TX working, monitor mode enabled
+**Status:** Under development — continuous RX working, monitor mode packet capture not yet verified
 
 ## Driver Architecture
 
