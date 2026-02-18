@@ -1,6 +1,6 @@
 # RTL8188EU Driver Status - Feb 17, 2026
 
-## Version: 0.33 - Fix RF Readback Timing (Continuous RX Working!)
+## Version: 0.35 - Fix PF_PACKET delivery for monitor mode
 
 ---
 
@@ -67,8 +67,7 @@
 - **Does not prevent RX from working**
 
 ### Not Yet Tested
-- `airodump-ng` with this driver
-- Radiotap header generation for monitor mode tools
+- Packet capture tools with this driver (v0.35 should fix delivery)
 - Channel hopping
 - Extended continuous operation
 
@@ -90,6 +89,8 @@ RX: 9 packets, 1909 bytes (CONTINUOUS!)
 
 | Version | Date | Change |
 |---------|------|--------|
+| v0.35 | Feb 17 | Fix PF_PACKET delivery (skb_reset_mac_header + radiotap header_ops) |
+| v0.34 | Feb 17 | Wireless extensions + radiotap headers for monitor mode |
 | v0.33 | Feb 17 | Fix RF readback timing 10us->100us — **CONTINUOUS RX!** |
 | v0.32 | Feb 16 | Fix calibration RF state (LC cal + IQK save/restore) |
 | v0.31 | Feb 16 | Fix RF environment setup + RF diagnostics |
@@ -117,7 +118,7 @@ RX: 9 packets, 1909 bytes (CONTINUOUS!)
 
 ## Next Steps
 
-1. Test with `sudo airodump-ng <interface>` to see WiFi networks
+1. Test packet capture in monitor mode
 2. Fix LC calibration RF readback (0x00000 issue)
 3. Add radiotap headers if needed for monitor mode tools
 4. Test extended continuous operation
@@ -136,5 +137,5 @@ RX: 9 packets, 1909 bytes (CONTINUOUS!)
 ---
 
 **Last Updated**: Feb 17, 2026
-**Version**: 0.33
-**Status**: Continuous RX working! Next: airodump-ng test
+**Version**: 0.35
+**Status**: PF_PACKET delivery fixed. Ready for monitor mode test

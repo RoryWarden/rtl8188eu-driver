@@ -1,8 +1,8 @@
 # RTL8188EU Driver - Quick Start & Progress
 
 **Last Updated:** Feb 17, 2026
-**Current Version:** v0.33 (Fix RF readback timing — 10µs → 100µs)
-**Previous Version:** v0.32 (Fix calibration RF state corruption)
+**Current Version:** v0.35 (Fix packet delivery to PF_PACKET sockets for monitor mode)
+**Previous Version:** v0.34 (Add wireless extensions + radiotap headers for monitor mode)
 
 ---
 
@@ -16,12 +16,13 @@
 - ✅ **Continuous RX: 10 callbacks, 9 packets received!**
 - ✅ PHY layer + calibration complete
 
-**Current Status (Feb 17, 2026 - v0.33 TESTED ✅):**
-- ✅ **v0.33 TESTED:** Fix RF readback timing — 10µs → 100µs
-  - `Post-RF: RF_REG 0x00 = 0x33e60` — RF read now works after init
-  - **RX now continuous!** 10 RX callbacks, 9 packets — was stuck at 1
-  - LC cal save still reads 0x00000 — separate issue, but RX works anyway
-- ⏳ **NEXT:** LC cal RF readback still broken (reads 0x00000 inside cal function)
+**Current Status (Feb 17, 2026 - v0.35 READY TO TEST):**
+- ✅ **v0.34:** Add wireless extensions + radiotap headers for monitor mode
+- ✅ **v0.35:** Fix packet delivery to PF_PACKET sockets for monitor mode
+  - Added `skb_reset_mac_header()` before `netif_rx()` — fixes uninitialized mac_header
+  - Cleared `hard_header_len` and `header_ops` for radiotap device (not ethernet)
+  - Without these, PF_PACKET's `packet_rcv()` silently drops all frames
+- ⏳ **NEXT:** Test packet capture in monitor mode
 
 **Key Finding:** Conditional table parsing was the solution! AGC table had 266 PCI/SDIO-only entries!
 
@@ -80,7 +81,7 @@
 - [x] Check interface comes up - **Yes, but without PHY**
 - [ ] **Verify RX counter increments!** - **BLOCKED: PHY can't initialize**
 - [ ] Test channel switching - **BLOCKED**
-- [ ] Test with airodump-ng (final goal) - **BLOCKED**
+- [ ] Test packet capture in monitor mode - **BLOCKED**
 
 ### Phase 7: PHY Initialization Debug ✅ ROOT CAUSE FOUND
 - [x] Stage 1: Read-only BB/RF register tests - Device stable!
@@ -106,7 +107,7 @@
 - [x] Check interface comes up - **enxb2021e9f85f3 active!**
 - [x] TX works - **35+ packets sent**
 - [ ] RX not working - **0 packets received**
-- [ ] Test with airodump-ng - **Blocked by missing RX**
+- [ ] Test packet capture - **Blocked by missing RX**
 
 ### Phase 10: Fix RX Reception ✅ PARTIAL
 - [x] Fix AGC table loading - **258 loaded successfully!**
@@ -114,6 +115,21 @@
 - [x] Add RX debugging to trace packet flow
 - [ ] **No URB callbacks - hardware not sending data**
 - [ ] Implement IQK/LCK calibration - **CRITICAL FOR RX**
+
+### Phase 19: Wireless Extensions + Radiotap (v0.34) ✅ COMPLETE
+- [x] Add wireless extension handlers (SIOCGIWNAME, SIOCSIWMODE, SIOCGIWMODE, SIOCSIWFREQ, SIOCGIWFREQ)
+- [x] Add radiotap header struct and prepend to RX packets
+- [x] Set device type ARPHRD_IEEE80211_RADIOTAP in ndo_open
+- [x] Wire wireless_handlers to netdev
+- [x] Track channel in priv struct, set_channel saves it
+- [x] Update set_channel to use actual channel parameter (was hardcoded ch6)
+- [x] Build successful
+
+### Phase 20: Fix PF_PACKET delivery (v0.35) ⏳ READY TO TEST
+- [x] Add `skb_reset_mac_header()` in RX path before `netif_rx()`
+- [x] Clear `hard_header_len` and `header_ops` in ndo_open for radiotap device
+- [x] Build successful
+- [ ] Test packet capture in monitor mode
 
 ### Phase 11: RF Calibration ✅ FUNCTIONAL (RX working!)
 - [x] Research IQK (I/Q Calibration) implementation
@@ -253,7 +269,7 @@ RX: 0 packets ❌ (blocked on PHY init)
 **After PHY implementation:**
 ```
 Expected: RX counter starts incrementing
-Goal: Can run airodump-ng successfully
+Goal: Can capture packets in monitor mode
 ```
 
 ---
@@ -319,7 +335,9 @@ Running in "safe mode" with no PHY init - device stable but RX non-functional
 - ✅ v0.31: **Fix RF environment setup + RF diagnostics — RF chip works! (0x33e60)**
 - ✅ v0.32: **Fix calibration RF state corruption (LC cal + IQK save/restore)**
 - ✅ v0.33: **Fix RF readback timing — 10µs → 100µs — CONTINUOUS RX WORKING!**
-- 🎯 v1.0: **Continuous RX + airodump-ng working (goal: capture WiFi networks!)**
+- ✅ v0.34: **Wireless extensions + radiotap headers for monitor mode**
+- ⏳ v0.35: **Fix PF_PACKET delivery (skb_reset_mac_header + radiotap header_ops)**
+- 🎯 v1.0: **Continuous RX + monitor mode capture working (goal: capture WiFi networks!)**
 
 ---
 
@@ -450,7 +468,7 @@ Despite being in an apartment complex with heavy WiFi traffic, we only receive 1
 **Final goal:**
 - [x] RX packets counter > 0 ✅ **ACHIEVED!**
 - [x] Continuous RX (more than 1 packet) ✅ **ACHIEVED v0.33! 10 callbacks!**
-- [ ] `sudo airodump-ng <interface>` shows WiFi networks
+- [ ] Monitor mode packet capture shows WiFi networks
 - [ ] Can capture packets in monitor mode
 
 ---

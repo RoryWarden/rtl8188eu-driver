@@ -310,8 +310,8 @@ watch -n 1 'ip -s link show <interface_name>'
 **After full PHY implementation (ACHIEVED v0.33!):**
 - ✅ RX packet counter increments — **10 callbacks, 9 packets**
 - ✅ Radio properly tuned to WiFi channel 6
-- ⏳ Can add radiotap headers for airodump-ng
-- ⏳ Monitor mode fully functional (needs airodump-ng test)
+- ⏳ Can add radiotap headers for monitor mode tools
+- ⏳ Monitor mode fully functional (needs packet capture test)
 
 **Estimated timeline:**
 - Phase 1-2: 2-3 hours (functions + tables)
@@ -344,4 +344,4 @@ watch -n 1 'ip -s link show <interface_name>'
 
 **Last Updated:** Feb 17, 2026
 **Current Phase:** All phases complete — continuous RX working (v0.33)
-**Next Step:** Test with airodump-ng, fix LC cal RF readback (reads 0x00000 inside cal)
+**Next Step:** Test packet capture in monitor mode, fix LC cal RF readback (reads 0x00000 inside cal)

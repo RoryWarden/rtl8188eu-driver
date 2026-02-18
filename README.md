@@ -281,7 +281,7 @@ ip -s link show <interface>
 1. **Monitor Mode Only** — No station/AP mode (no mac80211/cfg80211)
 2. **Fixed Channel 6** — No channel hopping
 3. **No Encryption** — Hardware crypto not configured
-4. **No Radiotap Headers** — airodump-ng needs these
+4. **No Radiotap Headers** — monitor mode tools need these
 5. **No Rate Control** — Fixed data rate
 6. **No Power Save** — Always active
 7. **LC Cal Readback** — RF reads 0x00000 inside calibration (doesn't affect RX)
