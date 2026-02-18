@@ -52,6 +52,9 @@ struct rtl8188eu_priv {
 	/* H2C command interface tracking */
 	u8 last_hmebox_num;  /* Last H2C mailbox number used (0-3) */
 
+	/* Radio state */
+	u8 channel;  /* Current WiFi channel (1-14) */
+
 	/* Device state */
 	bool disconnecting;  /* Set during rmmod/disconnect to stop TX/RX */
 };

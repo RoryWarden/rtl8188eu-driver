@@ -826,60 +826,60 @@ EXPORT_SYMBOL(rtl8188eu_phy_test_read_only);
 void rtl8188eu_lc_calibrate(struct rtl8188eu_priv *priv)
 {
 	u8 tmp_reg;
-	u32 lc_cal, rf_val, rf_amode;
+	u32 lc_cal, rf_val, rf_amode = 0;
+	bool is_cont_tx;
 
 	pr_info("Starting LC calibration...\n");
 
-	/* Save RF_AC (reg 0x00) before calibration — old driver does this */
-	rf_amode = rtl8188eu_read_rf_reg(priv, RF_PATH_A, 0x00, bRFRegOffsetMask);
-	pr_info("LC Cal: Saved RF_AC = 0x%05x\n", rf_amode);
-
-	/* Step 1: Check if we're transmitting */
+	/* Step 1: Check if we're in continuous TX mode */
 	tmp_reg = rtl8188eu_read_reg32_direct(priv, 0xd00) >> 24;  /* Read 0xd03 */
+	is_cont_tx = (tmp_reg & 0x70) != 0;
 
-	if ((tmp_reg & 0x70) != 0) {
-		/* Disable continuous TX */
+	if (is_cont_tx) {
+		/* Continuous TX mode: save RF_AC, put RF in standby, disable TX */
+		rf_amode = rtl8188eu_read_rf_reg(priv, RF_PATH_A, 0x00, bRFRegOffsetMask);
+		pr_info("LC Cal: Continuous TX — saved RF_AC = 0x%05x\n", rf_amode);
+
 		rtl8188eu_write_reg32_direct(priv, 0xd00,
 			(rtl8188eu_read_reg32_direct(priv, 0xd00) & 0x00FFFFFF) |
 			((tmp_reg & 0x8F) << 24));
+
+		rtl8188eu_write_rf_reg(priv, RF_PATH_A, 0x00, bRFRegOffsetMask,
+				       (rf_amode & 0x8FFFF) | 0x10000);
 	} else {
-		/* Block all TX queues */
+		/* Packet TX mode (normal case during probe): just pause TX queues */
+		pr_info("LC Cal: Packet TX mode — pausing queues, not touching RF_AC\n");
 		rtl8188eu_write_reg8(priv, REG_TXPAUSE, 0xFF);
 	}
 
-	/* Set RF to standby mode before LC cal (bit 16 = standby) */
-	rtl8188eu_write_rf_reg(priv, RF_PATH_A, 0x00, bRFRegOffsetMask,
-			       (rf_amode & 0x8FFFF) | 0x10000);
-
-	/* Step 2: Read RF reg 0x18 (channel/BW register) */
+	/* Step 2: Trigger LC calibration via RF reg 0x18 bit 15 */
 	lc_cal = rtl8188eu_read_rf_reg(priv, RF_PATH_A, RF_CHNLBW, bRFRegOffsetMask);
 	pr_info("LC Cal: RF 0x18 = 0x%05x\n", lc_cal);
 
-	/* Step 3: Set bit 15 to start LC calibration */
 	rtl8188eu_write_rf_reg(priv, RF_PATH_A, RF_CHNLBW, bRFRegOffsetMask,
 				lc_cal | 0x08000);
 
-	/* Step 4: Wait for calibration to complete */
+	/* Step 3: Wait for calibration to complete */
 	msleep(100);
 
-	/* Restore RF_AC — this is the critical fix (was missing, killed RF) */
-	rtl8188eu_write_rf_reg(priv, RF_PATH_A, 0x00, bRFRegOffsetMask, rf_amode);
+	/* Step 4: Restore TX state */
+	if (is_cont_tx) {
+		/* Restore RF_AC and re-enable continuous TX */
+		rtl8188eu_write_rf_reg(priv, RF_PATH_A, 0x00, bRFRegOffsetMask, rf_amode);
+		rtl8188eu_write_reg32_direct(priv, 0xd00,
+			(rtl8188eu_read_reg32_direct(priv, 0xd00) & 0x00FFFFFF) |
+			(tmp_reg << 24));
+	} else {
+		/* Unpause TX queues */
+		rtl8188eu_write_reg8(priv, REG_TXPAUSE, 0x00);
+	}
 
-	/* Step 5: Read back to verify */
+	/* Read back to verify RF is still alive */
 	rf_val = rtl8188eu_read_rf_reg(priv, RF_PATH_A, RF_CHNLBW, bRFRegOffsetMask);
 	pr_info("LC Cal: After calibration, RF 0x18 = 0x%05x\n", rf_val);
 
 	rf_val = rtl8188eu_read_rf_reg(priv, RF_PATH_A, RF_AC, bRFRegOffsetMask);
 	pr_info("LC Cal: RF 0x00 = 0x%05x (expect 0x33e60)\n", rf_val);
-
-	/* Step 6: Restore TX state */
-	if ((tmp_reg & 0x70) != 0) {
-		rtl8188eu_write_reg32_direct(priv, 0xd00,
-			(rtl8188eu_read_reg32_direct(priv, 0xd00) & 0x00FFFFFF) |
-			(tmp_reg << 24));
-	} else {
-		rtl8188eu_write_reg8(priv, REG_TXPAUSE, 0x00);
-	}
 
 	pr_info("LC calibration complete\n");
 }

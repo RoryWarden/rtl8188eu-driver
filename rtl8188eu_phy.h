@@ -37,7 +37,7 @@ struct bb_register_definition {
 #define TransceiverA_HSPI_Readback  0x8b8
 
 /* Bit definitions for RF readback */
-#define bLSSIReadAddress    0x07f80000  /* Bits [22:19] */
+#define bLSSIReadAddress    0x7f800000  /* Bits [30:23] */
 #define bLSSIReadEdge       0x80000000  /* Bit [31] */
 #define bLSSIReadBackData   0xfffff     /* Bits [19:0] */
 

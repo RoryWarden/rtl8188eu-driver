@@ -16,11 +16,14 @@
 #include <linux/firmware.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
+#include <linux/if_arp.h>
+#include <net/iw_handler.h>
+#include <net/ieee80211_radiotap.h>
 #include "rtl8188eu.h"
 #include "rtl8188eu_phy.h"
 
 #define DRIVER_NAME "rtl8188eu_minimal"
-#define DRIVER_VERSION "0.33"
+#define DRIVER_VERSION "0.35"
 #define FIRMWARE_NAME "rtlwifi/rtl8188eufw.bin"
 
 /* Power Sequence Commands */
@@ -249,6 +252,37 @@ struct rtl8188eu_rx_desc {
 
 /* Round up to 128-byte boundary for DMA aggregation */
 #define RX_RND128(x)			(((x) + 127) & ~127)
+
+/* Radiotap header for monitor mode RX packets */
+struct rtl8188eu_radiotap_hdr {
+	struct ieee80211_radiotap_header hdr;
+	u8 flags;
+	u8 rate;
+	__le16 chan_freq;
+	__le16 chan_flags;
+	s8 signal;
+	u8 antenna;
+} __packed;
+
+#define RTL8188EU_RADIOTAP_PRESENT ( \
+	(1 << IEEE80211_RADIOTAP_FLAGS) | \
+	(1 << IEEE80211_RADIOTAP_RATE) | \
+	(1 << IEEE80211_RADIOTAP_CHANNEL) | \
+	(1 << IEEE80211_RADIOTAP_DBM_ANTSIGNAL) | \
+	(1 << IEEE80211_RADIOTAP_ANTENNA))
+
+/* Radiotap channel flags */
+#define RTL_CHAN_2GHZ		0x0080
+#define RTL_CHAN_OFDM		0x0040
+
+static inline u16 rtl8188eu_chan_to_freq(u8 channel)
+{
+	if (channel == 14)
+		return 2484;
+	if (channel >= 1 && channel <= 13)
+		return 2407 + 5 * channel;
+	return 2412;
+}
 
 /* RTL8188EU TX Descriptor (32 bytes) - prepended to each transmitted packet */
 struct rtl8188eu_tx_desc {
@@ -1883,18 +1917,15 @@ static int rtl8188eu_set_channel(struct rtl8188eu_priv *priv, u8 channel)
 	 */
 	u32 rf_data;
 	u32 attempts[] = {
-		0x00C06,    /* Just bandwidth (20MHz) + channel 6 */
-		0x83C06,    /* Typical high bits [19:12] + 20MHz + ch6 */
-		0x8FC06     /* Different high bits + 20MHz + ch6 */
+		0x00C00 | channel,
+		0x83C00 | channel,
+		0x8FC00 | channel
 	};
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(attempts); i++) {
 		rf_data = attempts[i] & bRFRegOffsetMask;
 		data = ((RF_CHNLBW << 20) | rf_data) & 0x0fffffff;
-
-		pr_info("%s: Attempt %d: Writing RF_CHNLBW with data=0x%05x, encoded=0x%08x\n",
-			DRIVER_NAME, i + 1, rf_data, data);
 
 		ret = rtl8188eu_write_reg32(priv, rFPGA0_XA_RFInterfaceOE, data);
 		if (ret < 0) {
@@ -1903,11 +1934,12 @@ static int rtl8188eu_set_channel(struct rtl8188eu_priv *priv, u8 channel)
 			continue;
 		}
 
-		/* Small delay between attempts */
 		msleep(10);
 	}
 
-	pr_info("%s: Radio channel tuning completed (%d attempts)\n", DRIVER_NAME, i);
+	priv->channel = channel;
+	pr_info("%s: Channel set to %d (%d MHz)\n",
+		DRIVER_NAME, channel, rtl8188eu_chan_to_freq(channel));
 	return 0;
 }
 
@@ -2040,16 +2072,38 @@ static void rtl8188eu_rx_complete(struct urb *urb)
 			goto next_pkt;
 		}
 
-		/* Allocate skb and deliver packet to network stack */
-		skb = dev_alloc_skb(pkt_len);
+		/* Allocate skb with room for radiotap header */
+		skb = dev_alloc_skb(sizeof(struct rtl8188eu_radiotap_hdr) + pkt_len);
 		if (!skb) {
 			netdev->stats.rx_dropped++;
 			goto next_pkt;
 		}
 
+		/* Prepend radiotap header */
+		{
+			struct rtl8188eu_radiotap_hdr *rthdr;
+
+			rthdr = skb_put(skb, sizeof(*rthdr));
+			memset(rthdr, 0, sizeof(*rthdr));
+			rthdr->hdr.it_version = 0;
+			rthdr->hdr.it_len = cpu_to_le16(sizeof(*rthdr));
+			rthdr->hdr.it_present = cpu_to_le32(RTL8188EU_RADIOTAP_PRESENT);
+			rthdr->flags = 0;
+			rthdr->rate = 0x0c;
+			rthdr->chan_freq = cpu_to_le16(
+				rtl8188eu_chan_to_freq(priv->channel));
+			rthdr->chan_flags = cpu_to_le16(
+				RTL_CHAN_2GHZ | RTL_CHAN_OFDM);
+			rthdr->signal = -50;
+			rthdr->antenna = 0;
+		}
+
+		/* Copy 802.11 frame data after radiotap header */
 		skb_put_data(skb, pbuf + RXDESC_SIZE + drvinfo_sz + shift_sz, pkt_len);
 		skb->dev = netdev;
-		skb->protocol = eth_type_trans(skb, netdev);
+		skb->pkt_type = PACKET_OTHERHOST;
+		skb->protocol = htons(ETH_P_802_2);
+		skb_reset_mac_header(skb);
 
 		netdev->stats.rx_packets++;
 		netdev->stats.rx_bytes += pkt_len;
@@ -2208,6 +2262,11 @@ static int rtl8188eu_ndo_open(struct net_device *netdev)
 	int ret;
 
 	pr_info("%s: Interface %s opened\n", DRIVER_NAME, netdev->name);
+
+	/* Always start in monitor mode with radiotap headers */
+	netdev->type = ARPHRD_IEEE80211_RADIOTAP;
+	netdev->hard_header_len = 0;
+	netdev->header_ops = NULL;
 
 	/* Clear RW_RELEASE_EN - when set, RXDMA delivers one packet then stops */
 	ret = rtl8188eu_read_reg32(priv, REG_RXPKT_NUM, &val32);
@@ -2464,6 +2523,87 @@ static netdev_tx_t rtl8188eu_ndo_start_xmit(struct sk_buff *skb,
 }
 
 /*
+ * Wireless extension handlers for airodump-ng / iwconfig compatibility
+ */
+static int rtl8188eu_wx_get_name(struct net_device *dev,
+	struct iw_request_info *info, union iwreq_data *wrqu, char *extra)
+{
+	strcpy(wrqu->name, "IEEE 802.11bgn");
+	return 0;
+}
+
+static int rtl8188eu_wx_set_mode(struct net_device *dev,
+	struct iw_request_info *info, union iwreq_data *wrqu, char *extra)
+{
+	if (wrqu->mode != IW_MODE_MONITOR)
+		return -EOPNOTSUPP;
+	dev->type = ARPHRD_IEEE80211_RADIOTAP;
+	return 0;
+}
+
+static int rtl8188eu_wx_get_mode(struct net_device *dev,
+	struct iw_request_info *info, union iwreq_data *wrqu, char *extra)
+{
+	wrqu->mode = IW_MODE_MONITOR;
+	return 0;
+}
+
+static int rtl8188eu_wx_set_freq(struct net_device *dev,
+	struct iw_request_info *info, union iwreq_data *wrqu, char *extra)
+{
+	struct rtl8188eu_priv *priv = dev->ml_priv;
+	u8 channel;
+
+	if (wrqu->freq.e == 0) {
+		channel = wrqu->freq.m;
+	} else {
+		int freq_mhz = wrqu->freq.m;
+		int i;
+
+		for (i = wrqu->freq.e; i > 6; i--)
+			freq_mhz *= 10;
+		for (i = wrqu->freq.e; i < 6; i++)
+			freq_mhz /= 10;
+
+		if (freq_mhz == 2484)
+			channel = 14;
+		else if (freq_mhz >= 2412 && freq_mhz <= 2472)
+			channel = (freq_mhz - 2407) / 5;
+		else
+			return -EINVAL;
+	}
+
+	if (channel < 1 || channel > 14)
+		return -EINVAL;
+
+	return rtl8188eu_set_channel(priv, channel);
+}
+
+static int rtl8188eu_wx_get_freq(struct net_device *dev,
+	struct iw_request_info *info, union iwreq_data *wrqu, char *extra)
+{
+	struct rtl8188eu_priv *priv = dev->ml_priv;
+
+	wrqu->freq.m = priv->channel;
+	wrqu->freq.e = 0;
+	wrqu->freq.flags = IW_FREQ_FIXED;
+	return 0;
+}
+
+static const iw_handler rtl8188eu_wx_handlers[] = {
+	[IW_IOCTL_IDX(SIOCGIWNAME)]	= rtl8188eu_wx_get_name,
+	[IW_IOCTL_IDX(SIOCSIWFREQ)]	= rtl8188eu_wx_set_freq,
+	[IW_IOCTL_IDX(SIOCGIWFREQ)]	= rtl8188eu_wx_get_freq,
+	[IW_IOCTL_IDX(SIOCSIWMODE)]	= rtl8188eu_wx_set_mode,
+	[IW_IOCTL_IDX(SIOCGIWMODE)]	= rtl8188eu_wx_get_mode,
+};
+
+static const struct iw_handler_def rtl8188eu_wx_def = {
+	.standard	= rtl8188eu_wx_handlers,
+	.num_standard	= ARRAY_SIZE(rtl8188eu_wx_handlers),
+};
+
+/*
  * Network device operations structure
  */
 static const struct net_device_ops rtl8188eu_netdev_ops = {
@@ -2501,6 +2641,7 @@ static int rtl8188eu_netdev_init(struct rtl8188eu_priv *priv)
 
 	/* Set network device operations */
 	netdev->netdev_ops = &rtl8188eu_netdev_ops;
+	netdev->wireless_handlers = &rtl8188eu_wx_def;
 
 	/* Store references */
 	priv->netdev = netdev;
@@ -2930,6 +3071,10 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 		rf00 = rtl8188eu_read_rf_reg(priv, RF_PATH_A, 0x00, 0xFFFFF);
 		pr_info("%s: Post-cal: RF_REG 0x00 = 0x%05x (expect 0x33e60)\n",
 			DRIVER_NAME, rf00);
+
+		if (rf00 == 0x00000)
+			pr_warn("%s: RF reads zero after calibration — RF read bug may persist\n",
+				DRIVER_NAME);
 	}
 
 	/* ===== POST-PHY INITIALIZATION ===== */

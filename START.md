@@ -1,8 +1,8 @@
 # RTL8188EU Driver - Quick Start & Progress
 
-**Last Updated:** Feb 17, 2026
-**Current Version:** v0.35 (Fix packet delivery to PF_PACKET sockets for monitor mode)
-**Previous Version:** v0.34 (Add wireless extensions + radiotap headers for monitor mode)
+**Last Updated:** Feb 18, 2026
+**Current Version:** v0.36 (Fix RF read address mask — monitor mode capture working!)
+**Previous Version:** v0.35 (Fix packet delivery to PF_PACKET sockets for monitor mode)
 
 ---
 
@@ -16,13 +16,15 @@
 - ✅ **Continuous RX: 10 callbacks, 9 packets received!**
 - ✅ PHY layer + calibration complete
 
-**Current Status (Feb 17, 2026 - v0.35 READY TO TEST):**
-- ✅ **v0.34:** Add wireless extensions + radiotap headers for monitor mode
+**Current Status (Feb 18, 2026 - v0.36 MONITOR MODE WORKING!):**
 - ✅ **v0.35:** Fix packet delivery to PF_PACKET sockets for monitor mode
-  - Added `skb_reset_mac_header()` before `netif_rx()` — fixes uninitialized mac_header
-  - Cleared `hard_header_len` and `header_ops` for radiotap device (not ethernet)
-  - Without these, PF_PACKET's `packet_rcv()` silently drops all frames
-- ⏳ **NEXT:** Test packet capture in monitor mode
+- ✅ **v0.36:** Fix RF read address mask (`bLSSIReadAddress` 0x07f80000 → 0x7f800000)
+  - Transposed hex digits caused RF reads to corrupt address field in reg 0x824
+  - RF 0x00 read after RF 0x18 would return 0x00000 (wrong register)
+  - LC cal RF readback now correct (0x33e60), removed safety net force-restore
+- ✅ **MILESTONE:** tcpdump captures 802.11 frames with radiotap headers!
+  - Beacons, probe requests, ACKs all visible
+  - Signal strength (-50dBm), frequency, data rate reported correctly
 
 **Key Finding:** Conditional table parsing was the solution! AGC table had 266 PCI/SDIO-only entries!
 
@@ -125,11 +127,17 @@
 - [x] Update set_channel to use actual channel parameter (was hardcoded ch6)
 - [x] Build successful
 
-### Phase 20: Fix PF_PACKET delivery (v0.35) ⏳ READY TO TEST
+### Phase 20: Fix PF_PACKET delivery (v0.35) ✅ COMPLETE
 - [x] Add `skb_reset_mac_header()` in RX path before `netif_rx()`
 - [x] Clear `hard_header_len` and `header_ops` in ndo_open for radiotap device
 - [x] Build successful
-- [ ] Test packet capture in monitor mode
+- [x] Test packet capture in monitor mode — **WORKS!**
+
+### Phase 21: Fix RF read address mask (v0.36) ✅ COMPLETE
+- [x] Fix `bLSSIReadAddress` mask from `0x07f80000` to `0x7f800000` in `rtl8188eu_phy.h`
+- [x] Remove safety net force-restore of RF_AC (no longer needed)
+- [x] LC cal RF readback now correct (0x33e60)
+- [x] tcpdump captures 20 packets with full radiotap headers
 
 ### Phase 11: RF Calibration ✅ FUNCTIONAL (RX working!)
 - [x] Research IQK (I/Q Calibration) implementation
@@ -140,7 +148,7 @@
 - [x] **v0.31 FINDING:** RF chip works (0x33e60) but LC cal kills it (→ 0x00000)
 - [x] **v0.32:** Fix LC cal (save/restore RF_AC) + rewrite IQK (save/restore 29 regs)
 - [x] **v0.33:** Fix RF readback timing (10µs → 100µs) — **RX now continuous!**
-- [ ] LC cal save still reads 0x00000 (RF read inside cal function still broken)
+- [x] LC cal RF read fixed! (was bLSSIReadAddress mask bug, not cal-specific issue)
 
 ### Phase 12: BB/RF Hardware Access Issue ✅ SOLVED!
 - [x] Debug why all BB/RF registers read 0xeaeaeaea - Missing power sequence
@@ -336,7 +344,8 @@ Running in "safe mode" with no PHY init - device stable but RX non-functional
 - ✅ v0.32: **Fix calibration RF state corruption (LC cal + IQK save/restore)**
 - ✅ v0.33: **Fix RF readback timing — 10µs → 100µs — CONTINUOUS RX WORKING!**
 - ✅ v0.34: **Wireless extensions + radiotap headers for monitor mode**
-- ⏳ v0.35: **Fix PF_PACKET delivery (skb_reset_mac_header + radiotap header_ops)**
+- ✅ v0.35: **Fix PF_PACKET delivery (skb_reset_mac_header + radiotap header_ops)**
+- ✅ v0.36: **Fix RF read address mask (bLSSIReadAddress) — monitor mode capture working!**
 - 🎯 v1.0: **Continuous RX + monitor mode capture working (goal: capture WiFi networks!)**
 
 ---
@@ -468,8 +477,8 @@ Despite being in an apartment complex with heavy WiFi traffic, we only receive 1
 **Final goal:**
 - [x] RX packets counter > 0 ✅ **ACHIEVED!**
 - [x] Continuous RX (more than 1 packet) ✅ **ACHIEVED v0.33! 10 callbacks!**
-- [ ] Monitor mode packet capture shows WiFi networks
-- [ ] Can capture packets in monitor mode
+- [x] Monitor mode packet capture shows WiFi networks ✅ **ACHIEVED v0.36!**
+- [x] Can capture packets in monitor mode ✅ **ACHIEVED v0.36!**
 
 ---
 

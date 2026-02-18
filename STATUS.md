@@ -1,6 +1,6 @@
-# RTL8188EU Driver Status - Feb 17, 2026
+# RTL8188EU Driver Status - Feb 18, 2026
 
-## Version: 0.35 - Fix PF_PACKET delivery for monitor mode
+## Version: 0.36 - Fix RF read address mask — monitor mode capture working!
 
 ---
 
@@ -23,10 +23,10 @@
 - Post-PHY BB block enable (CCK/OFDM)
 - RF environment setup (BB 0x860, 0x870)
 
-### Calibration (FUNCTIONAL)
+### Calibration (COMPLETE)
 - IQK calibration (TX+RX paths, save/restore 29 registers)
-- LC calibration (with RF_AC save/restore attempt)
-- Post-cal RF 0x00 readback issue (reads 0x00000 inside cal, but RX works)
+- LC calibration (packet TX mode — pauses queues, doesn't touch RF_AC)
+- Post-cal RF 0x00 reads correctly (0x33e60) — address mask bug fixed in v0.36
 
 ### Network Interface (COMPLETE)
 - USB endpoints detected (RX: 0x81, TX: 0x02)
@@ -47,8 +47,8 @@
 - USB aggregation configured (RXDMA_AGG_PG_TH=0x30, timeout=0x04)
 - RXDMA_AGG_EN enabled in TRXDMA_CTRL
 - RX DMA enabled in ndo_open, disabled in ndo_stop
-- **10 RX callbacks, 9 packets received per session (v0.33)**
 - URB resubmission working correctly
+- **Monitor mode capture working — beacons, probes, ACKs with radiotap headers (v0.36)**
 
 ### Driver Stability (SOLID)
 - No kernel panics
@@ -60,27 +60,22 @@
 
 ## What Doesn't Work Yet
 
-### LC Calibration RF Readback
-- `LC Cal: Saved RF_AC = 0x00000` (should be 0x33e60)
-- RF read inside calibration function returns stale data
-- Post-RF read works fine (0x33e60) - issue is specific to cal context
-- **Does not prevent RX from working**
-
 ### Not Yet Tested
-- Packet capture tools with this driver (v0.35 should fix delivery)
 - Channel hopping
 - Extended continuous operation
+- Association / managed mode
 
 ---
 
 ## Current Interface State
 
 ```
-Interface: enx660cbaa475f3 (changes each boot - random MAC)
+Interface: enxf2b05ccc2215 (changes each boot - random MAC)
 State: UP, carrier ON
 Monitor Mode: ENABLED (RCR = 0xf000392f)
-TX: 17 packets, 2761 bytes
-RX: 9 packets, 1909 bytes (CONTINUOUS!)
+Link type: IEEE802_11_RADIO (radiotap)
+tcpdump: 20 packets captured, 0 dropped
+Signal: -50dBm, 2437 MHz (ch1), 6.0 Mb/s
 ```
 
 ---
@@ -89,6 +84,7 @@ RX: 9 packets, 1909 bytes (CONTINUOUS!)
 
 | Version | Date | Change |
 |---------|------|--------|
+| v0.36 | Feb 18 | Fix RF read address mask (bLSSIReadAddress) — **MONITOR MODE WORKING!** |
 | v0.35 | Feb 17 | Fix PF_PACKET delivery (skb_reset_mac_header + radiotap header_ops) |
 | v0.34 | Feb 17 | Wireless extensions + radiotap headers for monitor mode |
 | v0.33 | Feb 17 | Fix RF readback timing 10us->100us — **CONTINUOUS RX!** |
@@ -118,10 +114,9 @@ RX: 9 packets, 1909 bytes (CONTINUOUS!)
 
 ## Next Steps
 
-1. Test packet capture in monitor mode
-2. Fix LC calibration RF readback (0x00000 issue)
-3. Add radiotap headers if needed for monitor mode tools
-4. Test extended continuous operation
+1. Test channel hopping
+2. Test extended continuous operation
+3. Consider managed mode / association support
 
 ---
 
@@ -136,6 +131,6 @@ RX: 9 packets, 1909 bytes (CONTINUOUS!)
 
 ---
 
-**Last Updated**: Feb 17, 2026
-**Version**: 0.35
-**Status**: PF_PACKET delivery fixed. Ready for monitor mode test
+**Last Updated**: Feb 18, 2026
+**Version**: 0.36
+**Status**: Monitor mode packet capture fully working!
