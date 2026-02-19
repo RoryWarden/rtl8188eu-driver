@@ -23,7 +23,7 @@
 #include "rtl8188eu_phy.h"
 
 #define DRIVER_NAME "rtl8188eu_minimal"
-#define DRIVER_VERSION "0.35"
+#define DRIVER_VERSION "0.37"
 #define FIRMWARE_NAME "rtlwifi/rtl8188eufw.bin"
 
 /* Power Sequence Commands */
@@ -253,7 +253,7 @@ struct rtl8188eu_rx_desc {
 /* Round up to 128-byte boundary for DMA aggregation */
 #define RX_RND128(x)			(((x) + 127) & ~127)
 
-/* Radiotap header for monitor mode RX packets */
+/* Radiotap header for monitor mode RX packets (with MCS field for HT rates) */
 struct rtl8188eu_radiotap_hdr {
 	struct ieee80211_radiotap_header hdr;
 	u8 flags;
@@ -262,6 +262,9 @@ struct rtl8188eu_radiotap_hdr {
 	__le16 chan_flags;
 	s8 signal;
 	u8 antenna;
+	u8 mcs_known;
+	u8 mcs_flags;
+	u8 mcs_index;
 } __packed;
 
 #define RTL8188EU_RADIOTAP_PRESENT ( \
@@ -269,11 +272,26 @@ struct rtl8188eu_radiotap_hdr {
 	(1 << IEEE80211_RADIOTAP_RATE) | \
 	(1 << IEEE80211_RADIOTAP_CHANNEL) | \
 	(1 << IEEE80211_RADIOTAP_DBM_ANTSIGNAL) | \
-	(1 << IEEE80211_RADIOTAP_ANTENNA))
+	(1 << IEEE80211_RADIOTAP_ANTENNA) | \
+	(1 << IEEE80211_RADIOTAP_MCS))
 
 /* Radiotap channel flags */
 #define RTL_CHAN_2GHZ		0x0080
 #define RTL_CHAN_OFDM		0x0040
+#define RTL_CHAN_CCK		0x0020
+
+/* RX DW0 bit definitions for PHY status */
+#define RX_DW0_PHYST		BIT(26)		/* PHY status present */
+
+/* Hardware rate code to radiotap rate (500kbps units) lookup table */
+static const u8 rtl8188eu_hw_rate_to_radiotap[] = {
+	2, 4, 11, 22,				/* CCK: 1/2/5.5/11 Mbps (0x00-0x03) */
+	12, 18, 24, 36,				/* OFDM: 6/9/12/18 Mbps (0x04-0x07) */
+	48, 72, 96, 108,			/* OFDM: 24/36/48/54 Mbps (0x08-0x0b) */
+};
+
+/* CCK LNA gain table for signal strength calculation */
+static const s8 cck_lna_gain[] = { 17, -1, -13, -29, -32, -35, -38, -41 };
 
 static inline u16 rtl8188eu_chan_to_freq(u8 channel)
 {
@@ -637,7 +655,7 @@ static int rtl8188eu_execute_power_sequence(struct rtl8188eu_priv *priv,
 	int i, retry, ret;
 	u8 val8;
 
-	pr_info("%s: Executing power sequence (CARDEMU->ACT)...\n", DRIVER_NAME);
+	pr_debug("%s: Executing power sequence (CARDEMU->ACT)...\n", DRIVER_NAME);
 
 	for (i = 0; seq[i].cmd != PWR_CMD_END; i++) {
 		u16 reg = seq[i].offset;
@@ -659,12 +677,12 @@ static int rtl8188eu_execute_power_sequence(struct rtl8188eu_priv *priv,
 				return ret;
 			}
 
-			pr_info("%s: PWR SEQ: Wrote 0x%02x to reg 0x%04x\n",
+			pr_debug("%s: PWR SEQ: Wrote 0x%02x to reg 0x%04x\n",
 				DRIVER_NAME, val8, reg);
 			break;
 
 		case PWR_CMD_POLLING:
-			pr_info("%s: PWR SEQ: Polling reg 0x%04x for 0x%02x\n",
+			pr_debug("%s: PWR SEQ: Polling reg 0x%04x for 0x%02x\n",
 				DRIVER_NAME, reg, seq[i].value);
 
 			for (retry = 0; retry < 5000; retry++) {
@@ -674,16 +692,8 @@ static int rtl8188eu_execute_power_sequence(struct rtl8188eu_priv *priv,
 					return ret;
 				}
 
-				if ((val8 & seq[i].mask) == (seq[i].value & seq[i].mask)) {
-					pr_info("%s: PWR SEQ: Poll success (val=0x%02x)\n",
-						DRIVER_NAME, val8);
+				if ((val8 & seq[i].mask) == (seq[i].value & seq[i].mask))
 					break;
-				}
-
-				if (retry % 100 == 99) {
-					pr_info("%s: PWR SEQ: Still polling... (val=0x%02x)\n",
-						DRIVER_NAME, val8);
-				}
 
 				usleep_range(10, 20);
 			}
@@ -701,7 +711,7 @@ static int rtl8188eu_execute_power_sequence(struct rtl8188eu_priv *priv,
 		}
 	}
 
-	pr_info("%s: Power sequence complete (CARDEMU->ACT transition done)\n", DRIVER_NAME);
+	pr_debug("%s: Power sequence complete\n", DRIVER_NAME);
 	return 0;
 }
 
@@ -712,14 +722,11 @@ static int rtl8188eu_power_on(struct rtl8188eu_priv *priv)
 {
 	u16 value16;
 	int ret;
-	int retry;
 
-	pr_info("%s: Step 2: Powering on chip...\n", DRIVER_NAME);
+	pr_debug("%s: Powering on chip...\n", DRIVER_NAME);
 
-	if (priv->chip_powered_on) {
-		pr_info("%s: Chip already powered on\n", DRIVER_NAME);
+	if (priv->chip_powered_on)
 		return 0;
-	}
 
 	/* Execute power-on sequence to transition from CARDEMU to ACT mode */
 	ret = rtl8188eu_execute_power_sequence(priv, rtl8188e_power_on_seq);
@@ -729,24 +736,15 @@ static int rtl8188eu_power_on(struct rtl8188eu_priv *priv)
 	}
 
 	/* Reset REG_CR to 0 */
-	pr_info("%s: Resetting REG_CR (0x%04x) to 0x00\n", DRIVER_NAME, REG_CR);
 	ret = rtl8188eu_write_reg16(priv, REG_CR, 0x00);
-	if (ret < 0) {
-		pr_err("%s: Failed to reset REG_CR\n", DRIVER_NAME);
+	if (ret < 0)
 		return ret;
-	}
 
-	/* Small delay for reset to take effect */
 	msleep(10);
 
-	/* Read current REG_CR value */
 	ret = rtl8188eu_read_reg16(priv, REG_CR, &value16);
-	if (ret < 0) {
-		pr_err("%s: Failed to read REG_CR\n", DRIVER_NAME);
+	if (ret < 0)
 		return ret;
-	}
-
-	pr_info("%s: REG_CR current value: 0x%04x\n", DRIVER_NAME, value16);
 
 	/* Enable MAC DMA/WMAC/SCHEDULE/SEC blocks including RX DMA at power-on */
 	value16 |= (CR_HCI_TXDMA_EN | CR_HCI_RXDMA_EN |
@@ -754,28 +752,12 @@ static int rtl8188eu_power_on(struct rtl8188eu_priv *priv)
 		    CR_PROTOCOL_EN | CR_SCHEDULE_EN |
 		    CR_ENSEC | CR_CALTMR_EN);
 
-	pr_info("%s: Writing REG_CR (0x%04x) with value: 0x%04x\n",
-		DRIVER_NAME, REG_CR, value16);
-	pr_info("%s: Enabling: HCI_TXDMA | HCI_RXDMA | TXDMA | RXDMA | PROTOCOL | SCHEDULE | SEC | CALTMR\n",
-		DRIVER_NAME);
-
 	ret = rtl8188eu_write_reg16(priv, REG_CR, value16);
-	if (ret < 0) {
-		pr_err("%s: Failed to write REG_CR\n", DRIVER_NAME);
+	if (ret < 0)
 		return ret;
-	}
-
-	/* Verify the write */
-	ret = rtl8188eu_read_reg16(priv, REG_CR, &value16);
-	if (ret < 0) {
-		pr_err("%s: Failed to verify REG_CR\n", DRIVER_NAME);
-		return ret;
-	}
-
-	pr_info("%s: REG_CR verified, new value: 0x%04x\n", DRIVER_NAME, value16);
 
 	priv->chip_powered_on = true;
-	pr_info("%s: Step 2 complete - chip powered on successfully!\n", DRIVER_NAME);
+	pr_debug("%s: Chip powered on (REG_CR=0x%04x)\n", DRIVER_NAME, value16);
 
 	return 0;
 }
@@ -786,10 +768,7 @@ static int rtl8188eu_power_on(struct rtl8188eu_priv *priv)
 static int rtl8188eu_enable_mcu_clocks(struct rtl8188eu_priv *priv)
 {
 	u16 val16;
-	u8 val8;
 	int ret;
-
-	pr_info("%s: Enabling MCU clocks for firmware operation...\n", DRIVER_NAME);
 
 	/* Enable FEN_ELDR (EEPROM Loader clock) if not already enabled */
 	ret = rtl8188eu_read_reg16(priv, REG_SYS_FUNC_EN, &val16);
@@ -797,7 +776,6 @@ static int rtl8188eu_enable_mcu_clocks(struct rtl8188eu_priv *priv)
 		return ret;
 
 	if (!(val16 & FEN_ELDR)) {
-		pr_info("%s: Enabling FEN_ELDR (EEPROM Loader clock)\n", DRIVER_NAME);
 		val16 |= FEN_ELDR;
 		ret = rtl8188eu_write_reg16(priv, REG_SYS_FUNC_EN, val16);
 		if (ret < 0)
@@ -810,7 +788,6 @@ static int rtl8188eu_enable_mcu_clocks(struct rtl8188eu_priv *priv)
 		return ret;
 
 	if (!(val16 & LOADER_CLK_EN) || !(val16 & ANA8M)) {
-		pr_info("%s: Enabling LOADER_CLK_EN and ANA8M clocks\n", DRIVER_NAME);
 		val16 |= (LOADER_CLK_EN | ANA8M);
 		ret = rtl8188eu_write_reg16(priv, REG_SYS_CLKR, val16);
 		if (ret < 0)
@@ -818,12 +795,11 @@ static int rtl8188eu_enable_mcu_clocks(struct rtl8188eu_priv *priv)
 	}
 
 	/* Set AFE_XTAL_CTRL+1 to 0x80 for crystal control */
-	pr_info("%s: Setting AFE crystal control\n", DRIVER_NAME);
 	ret = rtl8188eu_write_reg8(priv, REG_AFE_XTAL_CTRL + 1, 0x80);
 	if (ret < 0)
 		return ret;
 
-	pr_info("%s: MCU clocks enabled successfully\n", DRIVER_NAME);
+	pr_debug("%s: MCU clocks enabled\n", DRIVER_NAME);
 	return 0;
 }
 
@@ -835,37 +811,19 @@ static int rtl8188eu_init_interrupts(struct rtl8188eu_priv *priv)
 	int ret;
 	u32 himr;
 
-	pr_info("%s: Step 4: Initializing interrupts...\n", DRIVER_NAME);
-
-	/* Clear all pending interrupts by writing 1s to HISR */
-	pr_info("%s: Clearing REG_HISR_88E (0x%04x) = 0xFFFFFFFF\n",
-		DRIVER_NAME, REG_HISR_88E);
+	/* Clear all pending interrupts */
 	ret = rtl8188eu_write_reg32(priv, REG_HISR_88E, 0xFFFFFFFF);
-	if (ret < 0) {
-		pr_err("%s: Failed to clear interrupts\n", DRIVER_NAME);
+	if (ret < 0)
 		return ret;
-	}
 
-	/* Enable RX interrupts for packet reception */
-	himr = BIT(0) |   /* ROK - Receive DMA OK */
-	       BIT(1) |   /* RDU - Rx Descriptor Unavailable */
-	       BIT(8) |   /* RXFOVW - Receive FIFO Overflow */
-	       BIT(10);   /* RXERR - Rx Error */
-
-	pr_info("%s: Enabling RX interrupts: REG_HIMR_88E = 0x%08x\n",
-		DRIVER_NAME, himr);
-	pr_info("%s:   BIT(0) - ROK (Receive DMA OK)\n", DRIVER_NAME);
-	pr_info("%s:   BIT(1) - RDU (Rx Descriptor Unavailable)\n", DRIVER_NAME);
-	pr_info("%s:   BIT(8) - RXFOVW (Receive FIFO Overflow)\n", DRIVER_NAME);
-	pr_info("%s:   BIT(10) - RXERR (Rx Error)\n", DRIVER_NAME);
+	/* Enable RX interrupts: ROK, RDU, RXFOVW, RXERR */
+	himr = BIT(0) | BIT(1) | BIT(8) | BIT(10);
 
 	ret = rtl8188eu_write_reg32(priv, REG_HIMR_88E, himr);
-	if (ret < 0) {
-		pr_err("%s: Failed to configure interrupt mask\n", DRIVER_NAME);
+	if (ret < 0)
 		return ret;
-	}
 
-	pr_info("%s: Step 4 complete - RX interrupts enabled\n", DRIVER_NAME);
+	pr_debug("%s: RX interrupts enabled (HIMR=0x%08x)\n", DRIVER_NAME, himr);
 
 	return 0;
 }
@@ -884,19 +842,10 @@ static int rtl8188eu_init_transfer_page_size(struct rtl8188eu_priv *priv)
 	u8 value;
 	int ret;
 
-	pr_info("%s: Step 4a: Setting transfer page size to 128 bytes...\n", DRIVER_NAME);
-
-	/* TX page size = 128, RX page size = 128 */
 	value = _PSRX(PBP_128) | _PSTX(PBP_128);
-
 	ret = rtl8188eu_write_reg8(priv, REG_PBP, value);
-	if (ret < 0) {
-		pr_err("%s: Failed to set REG_PBP\n", DRIVER_NAME);
+	if (ret < 0)
 		return ret;
-	}
-
-	pr_info("%s: REG_PBP (0x%04x) = 0x%02x (TX=128, RX=128 bytes)\n",
-		DRIVER_NAME, REG_PBP, value);
 
 	return 0;
 }
@@ -909,29 +858,14 @@ static int rtl8188eu_init_page_boundary(struct rtl8188eu_priv *priv)
 	u16 rxff_bndy;
 	int ret;
 
-	pr_info("%s: Step 4b: Setting RX page boundary...\n", DRIVER_NAME);
-
-	/* RX Page Boundary = Total pages - 1 */
 	rxff_bndy = TOTAL_PAGE_NUMBER;
-
 	ret = rtl8188eu_write_reg16(priv, REG_TRXFF_BNDY, rxff_bndy);
-	if (ret < 0) {
-		pr_err("%s: Failed to set REG_TRXFF_BNDY\n", DRIVER_NAME);
+	if (ret < 0)
 		return ret;
-	}
 
-	pr_info("%s: REG_TRXFF_BNDY (0x%04x) = 0x%04x (page %d)\n",
-		DRIVER_NAME, REG_TRXFF_BNDY, rxff_bndy, rxff_bndy);
-
-	/* Set RX FIFO boundary - fix hardware bug where initial value is too large */
-	/* MAX_RX_DMA_BUFFER_SIZE = 0x2800 - 0x200 (FW reserved) = 0x2600 */
 	ret = rtl8188eu_write_reg16(priv, REG_TRXFF_BNDY + 2, 0x25FF);
-	if (ret < 0) {
-		pr_err("%s: Failed to set RX FIFO boundary\n", DRIVER_NAME);
+	if (ret < 0)
 		return ret;
-	}
-
-	pr_info("%s: RX FIFO boundary (0x0116) = 0x25FF\n", DRIVER_NAME);
 
 	return 0;
 }
@@ -944,41 +878,23 @@ static int rtl8188eu_init_tx_buffer_boundary(struct rtl8188eu_priv *priv)
 	u8 txpktbuf_bndy;
 	int ret;
 
-	pr_info("%s: Step 4c: Setting TX buffer boundaries...\n", DRIVER_NAME);
-
-	/* TX page boundary = TX total pages + 1 (168) */
 	txpktbuf_bndy = TX_PAGE_BOUNDARY;
 
-	/* Set beacon queue boundary */
 	ret = rtl8188eu_write_reg8(priv, REG_BCNQ_BDNY, txpktbuf_bndy);
 	if (ret < 0)
 		return ret;
-
-	/* Set management queue boundary */
 	ret = rtl8188eu_write_reg8(priv, REG_MGQ_BDNY, txpktbuf_bndy);
 	if (ret < 0)
 		return ret;
-
-	/* Set loopback buffer head */
 	ret = rtl8188eu_write_reg8(priv, REG_WMAC_LBK_BF_HD, txpktbuf_bndy);
 	if (ret < 0)
 		return ret;
-
-	/* Set TX/RX FIFO boundary */
 	ret = rtl8188eu_write_reg8(priv, REG_TRXFF_BNDY, txpktbuf_bndy);
 	if (ret < 0)
 		return ret;
-
-	/* Set TX DMA control boundary */
 	ret = rtl8188eu_write_reg8(priv, REG_TDECTRL + 1, txpktbuf_bndy);
 	if (ret < 0)
 		return ret;
-
-	pr_info("%s: TX buffer boundary set to page %d\n", DRIVER_NAME, txpktbuf_bndy);
-	pr_info("%s:   REG_BCNQ_BDNY (0x%04x) = %d\n",
-		DRIVER_NAME, REG_BCNQ_BDNY, txpktbuf_bndy);
-	pr_info("%s:   REG_MGQ_BDNY (0x%04x) = %d\n",
-		DRIVER_NAME, REG_MGQ_BDNY, txpktbuf_bndy);
 
 	return 0;
 }
@@ -993,8 +909,7 @@ static int rtl8188eu_init_queue_reserved_page(struct rtl8188eu_priv *priv)
 	u8 value8;
 	int ret;
 
-	pr_info("%s: Step 4d: Configuring queue reserved pages...\n", DRIVER_NAME);
-	pr_info("%s: EP config: %d EPs, queue_sel=0x%02x\n",
+	pr_debug("%s: EP config: %d EPs, queue_sel=0x%02x\n",
 		DRIVER_NAME, priv->out_ep_number, priv->out_ep_queue_sel);
 
 	/* Set page numbers for each queue (non-WMM mode) */
@@ -1032,12 +947,8 @@ static int rtl8188eu_init_queue_reserved_page(struct rtl8188eu_priv *priv)
 		return ret;
 	}
 
-	pr_info("%s: Queue page allocation:\n", DRIVER_NAME);
-	pr_info("%s:   High Priority Queue (HPQ): %d pages\n", DRIVER_NAME, numHQ);
-	pr_info("%s:   Low Priority Queue (LPQ): %d pages\n", DRIVER_NAME, numLQ);
-	pr_info("%s:   Normal Priority Queue (NPQ): %d pages\n", DRIVER_NAME, numNQ);
-	pr_info("%s:   Public Queue (PUBQ): %d pages\n", DRIVER_NAME, numPubQ);
-	pr_info("%s:   Total TX pages: %d\n", DRIVER_NAME, numHQ + numLQ + numNQ + numPubQ);
+	pr_debug("%s: Queue pages: HPQ=%d LPQ=%d NPQ=%d PUBQ=%d\n",
+		DRIVER_NAME, numHQ, numLQ, numNQ, numPubQ);
 
 	return 0;
 }
@@ -1079,7 +990,7 @@ static int rtl8188eu_init_llt_table(struct rtl8188eu_priv *priv)
 	int ret;
 	u32 i;
 
-	pr_info("%s: Initializing LLT table...\n", DRIVER_NAME);
+	pr_debug("%s: Initializing LLT table...\n", DRIVER_NAME);
 
 	/* TX pages: each entry points to the next */
 	for (i = 0; i < TX_PAGE_BOUNDARY - 1; i++) {
@@ -1105,9 +1016,7 @@ static int rtl8188eu_init_llt_table(struct rtl8188eu_priv *priv)
 	if (ret)
 		return ret;
 
-	pr_info("%s: LLT table initialized (TX: 0-%d, beacon ring: %d-%d)\n",
-		DRIVER_NAME, TX_PAGE_BOUNDARY - 1, TX_PAGE_BOUNDARY,
-		LAST_ENTRY_OF_TX_PKT_BUF);
+	pr_debug("%s: LLT table initialized\n", DRIVER_NAME);
 
 	return 0;
 }
@@ -1119,31 +1028,20 @@ static int rtl8188eu_init_tx_rx_queues(struct rtl8188eu_priv *priv)
 {
 	int ret;
 
-	pr_info("%s: ========================================\n", DRIVER_NAME);
-	pr_info("%s: Step 5: Initializing TX/RX Queues\n", DRIVER_NAME);
-
-	/* Step 4a: Set transfer page size (128 bytes) */
 	ret = rtl8188eu_init_transfer_page_size(priv);
 	if (ret)
 		return ret;
-
-	/* Step 4b: Set RX page boundary */
 	ret = rtl8188eu_init_page_boundary(priv);
 	if (ret)
 		return ret;
-
-	/* Step 4c: Set TX buffer boundaries */
 	ret = rtl8188eu_init_tx_buffer_boundary(priv);
 	if (ret)
 		return ret;
-
-	/* Step 4d: Configure queue reserved pages */
 	ret = rtl8188eu_init_queue_reserved_page(priv);
 	if (ret)
 		return ret;
 
-	pr_info("%s: Step 5 complete - TX/RX queues configured\n", DRIVER_NAME);
-	pr_info("%s: ========================================\n", DRIVER_NAME);
+	pr_debug("%s: TX/RX queues configured\n", DRIVER_NAME);
 
 	return 0;
 }
@@ -1154,7 +1052,7 @@ static int rtl8188eu_init_tx_rx_queues(struct rtl8188eu_priv *priv)
  */
 static int rtl8188eu_init_mac_regs(struct rtl8188eu_priv *priv)
 {
-	pr_info("%s: Initializing MAC registers...\n", DRIVER_NAME);
+	pr_debug("%s: Initializing MAC registers...\n", DRIVER_NAME);
 
 	/* SIFS timing (CCK=0x0A, OFDM=0x10) */
 	rtl8188eu_write_reg16(priv, REG_SPEC_SIFS, 0x100a);
@@ -1196,7 +1094,7 @@ static int rtl8188eu_init_mac_regs(struct rtl8188eu_priv *priv)
 	/* AMPDU max time */
 	rtl8188eu_write_reg8(priv, REG_AMPDU_MAX_TIME, 0x70);
 
-	pr_info("%s: MAC registers initialized\n", DRIVER_NAME);
+	pr_debug("%s: MAC registers initialized\n", DRIVER_NAME);
 
 	return 0;
 }
@@ -1223,14 +1121,12 @@ static int rtl8188eu_download_firmware(struct rtl8188eu_priv *priv)
 	/* Check if firmware has a header (starts with 0xE1 0x88) */
 	if (fw_size >= 32 && fw_data[0] == 0xE1 && fw_data[1] == 0x88) {
 		header_size = 32;
-		pr_info("%s: Firmware has 32-byte header, skipping it\n", DRIVER_NAME);
+		pr_debug("%s: Firmware has 32-byte header, skipping it\n", DRIVER_NAME);
 		fw_data += header_size;
 		fw_size -= header_size;
 	}
 
-	pr_info("%s: Downloading firmware to chip...\n", DRIVER_NAME);
-	pr_info("%s: Firmware size: %u bytes (after header), Pages: %u\n",
-		DRIVER_NAME, fw_size, (fw_size + MAX_FW_PAGE_SIZE - 1) / MAX_FW_PAGE_SIZE);
+	pr_debug("%s: Downloading firmware (%u bytes)...\n", DRIVER_NAME, fw_size);
 
 	page_nums = fw_size / MAX_FW_PAGE_SIZE;
 	remain_size = fw_size % MAX_FW_PAGE_SIZE;
@@ -1255,8 +1151,8 @@ static int rtl8188eu_download_firmware(struct rtl8188eu_priv *priv)
 			return ret;
 		}
 
-		pr_info("%s: Writing page %u/%u (offset 0x%x)\n",
-			DRIVER_NAME, page + 1, page_nums + (remain_size ? 1 : 0), offset);
+		pr_debug("%s: Writing FW page %u/%u\n",
+			DRIVER_NAME, page + 1, page_nums + (remain_size ? 1 : 0));
 
 		/* Write page data in blocks */
 		block_cnt = MAX_FW_PAGE_SIZE / MAX_FW_BLOCK_SIZE;
@@ -1312,8 +1208,8 @@ static int rtl8188eu_download_firmware(struct rtl8188eu_priv *priv)
 			return ret;
 		}
 
-		pr_info("%s: Writing final page %u (offset 0x%x, size %u bytes)\n",
-			DRIVER_NAME, page + 1, offset, remain_size);
+		pr_debug("%s: Writing final FW page %u (%u bytes)\n",
+			DRIVER_NAME, page + 1, remain_size);
 
 		block_cnt = remain_size / MAX_FW_BLOCK_SIZE;
 		block_remain = remain_size % MAX_FW_BLOCK_SIZE;
@@ -1346,7 +1242,7 @@ static int rtl8188eu_download_firmware(struct rtl8188eu_priv *priv)
 		}
 	}
 
-	pr_info("%s: Firmware download complete!\n", DRIVER_NAME);
+	pr_debug("%s: Firmware download complete\n", DRIVER_NAME);
 	return 0;
 }
 
@@ -1358,7 +1254,7 @@ static int rtl8188eu_reset_8051(struct rtl8188eu_priv *priv)
 	u8 val;
 	int ret;
 
-	pr_info("%s: Resetting 8051 MCU...\n", DRIVER_NAME);
+	pr_debug("%s: Resetting 8051 MCU...\n", DRIVER_NAME);
 
 	/* Reset MCU IO Wrapper (as per old driver _MCUIO_Reset88E) */
 	/* Clear REG_RSV_CTRL bit 1 */
@@ -1416,7 +1312,7 @@ static int rtl8188eu_reset_8051(struct rtl8188eu_priv *priv)
 	if (ret < 0)
 		return ret;
 
-	pr_info("%s: 8051 MCU reset complete (with MCU IO Wrapper reset)\n", DRIVER_NAME);
+	pr_debug("%s: 8051 MCU reset complete\n", DRIVER_NAME);
 	return 0;
 }
 
@@ -1429,83 +1325,57 @@ static int rtl8188eu_fw_download_enable(struct rtl8188eu_priv *priv, bool enable
 	int ret;
 
 	if (enable) {
-		pr_info("%s: Enabling firmware download mode...\n", DRIVER_NAME);
-
-		/* Check if already in download mode */
 		ret = rtl8188eu_read_reg8(priv, REG_MCUFWDL, &val);
 		if (ret < 0)
 			return ret;
 
 		if (val & RAM_DL_SEL) {
-			/* Already in download mode, reset it */
-			pr_info("%s: Clearing previous FW download state\n", DRIVER_NAME);
 			ret = rtl8188eu_write_reg8(priv, REG_MCUFWDL, 0x00);
 			if (ret < 0)
 				return ret;
-
 			ret = rtl8188eu_reset_8051(priv);
 			if (ret < 0)
 				return ret;
 		}
 
-		/* Reset checksum by setting bit 2 before enabling download */
 		ret = rtl8188eu_read_reg8(priv, REG_MCUFWDL, &val);
 		if (ret < 0)
 			return ret;
-
-		pr_info("%s: Resetting firmware checksum (set bit 2)\n", DRIVER_NAME);
 		ret = rtl8188eu_write_reg8(priv, REG_MCUFWDL, val | BIT(2));
 		if (ret < 0)
 			return ret;
 
-		/* Enable firmware download mode */
 		ret = rtl8188eu_read_reg8(priv, REG_MCUFWDL, &val);
 		if (ret < 0)
 			return ret;
-
 		ret = rtl8188eu_write_reg8(priv, REG_MCUFWDL, val | MCUFWDL_EN);
 		if (ret < 0)
 			return ret;
 
-		/* Reset 8051 (REG_MCUFWDL+2 bit 3) */
 		ret = rtl8188eu_read_reg8(priv, REG_MCUFWDL + 2, &val);
 		if (ret < 0)
 			return ret;
-
 		ret = rtl8188eu_write_reg8(priv, REG_MCUFWDL + 2, val & ~BIT(3));
 		if (ret < 0)
 			return ret;
-
-		pr_info("%s: Firmware download mode enabled\n", DRIVER_NAME);
 	} else {
-		pr_info("%s: Disabling firmware download mode...\n", DRIVER_NAME);
-
-		/* Disable firmware download mode */
 		ret = rtl8188eu_read_reg8(priv, REG_MCUFWDL, &val);
 		if (ret < 0)
 			return ret;
-
 		ret = rtl8188eu_write_reg8(priv, REG_MCUFWDL, val & ~MCUFWDL_EN);
 		if (ret < 0)
 			return ret;
 
-		/* Clear reserved register */
 		ret = rtl8188eu_write_reg8(priv, REG_MCUFWDL + 1, 0x00);
 		if (ret < 0)
 			return ret;
 
-		/* Release 8051 from reset (set bit 3 of REG_MCUFWDL+2) */
 		ret = rtl8188eu_read_reg8(priv, REG_MCUFWDL + 2, &val);
 		if (ret < 0)
 			return ret;
-
 		ret = rtl8188eu_write_reg8(priv, REG_MCUFWDL + 2, val | BIT(3));
 		if (ret < 0)
 			return ret;
-
-		pr_info("%s: 8051 MCU released from reset\n", DRIVER_NAME);
-
-		pr_info("%s: Firmware download mode disabled\n", DRIVER_NAME);
 	}
 
 	return 0;
@@ -1519,38 +1389,19 @@ static int rtl8188eu_verify_fw_checksum(struct rtl8188eu_priv *priv)
 	u32 val32;
 	int retry, ret;
 
-	pr_info("%s: Verifying firmware checksum...\n", DRIVER_NAME);
-
-	/* The checksum is verified by hardware automatically.
-	 * We poll REG_MCUFWDL bit 2 (FWDL_ChkSum_rpt) to check result.
-	 * Bit 2 = 1 means checksum OK, 0 means fail.
-	 * Note: Old driver checks bit 2, not bit 5 as in some docs.
-	 */
 	for (retry = 0; retry < 50; retry++) {
 		ret = rtl8188eu_read_reg32(priv, REG_MCUFWDL, &val32);
-		if (ret < 0) {
-			pr_err("%s: Failed to read REG_MCUFWDL\n", DRIVER_NAME);
+		if (ret < 0)
 			return ret;
-		}
 
-		/* Check bit 2 (0x04) for checksum result - fixed from bit 5 */
-		if (val32 & BIT(2)) {
-			pr_info("%s: Firmware checksum OK! (REG_MCUFWDL=0x%08x)\n",
-				DRIVER_NAME, val32);
+		if (val32 & BIT(2))
 			return 0;
-		}
-
-		if (retry % 10 == 9) {
-			pr_info("%s: Waiting for checksum... (REG_MCUFWDL=0x%08x)\n",
-				DRIVER_NAME, val32);
-		}
 
 		msleep(1);
 	}
 
-	pr_err("%s: Firmware checksum FAILED! (REG_MCUFWDL=0x%08x)\n",
+	pr_err("%s: Firmware checksum FAILED (REG_MCUFWDL=0x%08x)\n",
 	       DRIVER_NAME, val32);
-	pr_err("%s: Bit 2 should be set if checksum passed\n", DRIVER_NAME);
 	return -EIO;
 }
 
@@ -1561,33 +1412,14 @@ static int rtl8188eu_verify_fw_checksum(struct rtl8188eu_priv *priv)
 static int rtl8188eu_init_h2c(struct rtl8188eu_priv *priv)
 {
 	int ret;
-	u8 val;
 
-	pr_info("%s: Initializing H2C command interface...\n", DRIVER_NAME);
-
-	/* Write 0x0F to REG_HMETFR to initialize H2C */
 	ret = rtl8188eu_write_reg8(priv, REG_HMETFR, 0x0F);
-	if (ret < 0) {
-		pr_err("%s: Failed to write REG_HMETFR: %d\n", DRIVER_NAME, ret);
+	if (ret < 0)
 		return ret;
-	}
 
-	/* Read back to verify */
-	ret = rtl8188eu_read_reg8(priv, REG_HMETFR, &val);
-	if (ret < 0) {
-		pr_err("%s: Failed to read REG_HMETFR: %d\n", DRIVER_NAME, ret);
-		return ret;
-	}
-
-	pr_info("%s: H2C initialized - REG_HMETFR=0x%02x (expected 0x0F)\n",
-		DRIVER_NAME, val);
-
-	/* Initialize H2C mailbox counter */
 	priv->last_hmebox_num = 0;
-	pr_info("%s: H2C mailbox counter initialized to 0\n", DRIVER_NAME);
-
-	/* Give firmware time to process H2C initialization */
 	msleep(10);
+	pr_debug("%s: H2C initialized\n", DRIVER_NAME);
 
 	return 0;
 }
@@ -1600,47 +1432,29 @@ static int rtl8188eu_fw_free_to_go(struct rtl8188eu_priv *priv)
 	u32 val32;
 	int retry, ret;
 
-	pr_info("%s: Activating firmware...\n", DRIVER_NAME);
-
-	/* Set MCUFWDL_RDY, clear WINTINI_RDY */
 	ret = rtl8188eu_read_reg32(priv, REG_MCUFWDL, &val32);
 	if (ret < 0)
 		return ret;
 
-	pr_info("%s: Before activation: REG_MCUFWDL=0x%08x\n", DRIVER_NAME, val32);
-
-	/* Check if RAM_DL_SEL is set - if so, clear entire register first */
 	if (val32 & RAM_DL_SEL) {
-		pr_info("%s: RAM_DL_SEL is set, clearing REG_MCUFWDL first\n", DRIVER_NAME);
 		ret = rtl8188eu_write_reg32(priv, REG_MCUFWDL, 0x00);
 		if (ret < 0)
 			return ret;
 		val32 = 0;
 	}
 
-	/* Clear REG_MCUFWDL+1 (second byte) - critical for 8051 startup! */
-	pr_info("%s: Clearing REG_MCUFWDL+1 (was 0x%02x)\n", DRIVER_NAME, (val32 >> 8) & 0xFF);
 	ret = rtl8188eu_write_reg8(priv, REG_MCUFWDL + 1, 0x00);
 	if (ret < 0)
 		return ret;
 
-	/* Now set MCUFWDL_RDY bit and clear WINTINI_RDY */
-	val32 = MCUFWDL_RDY;  /* Only set bit 1, clear all other bits */
-
-	pr_info("%s: Setting REG_MCUFWDL to 0x%08x (clean state with MCUFWDL_RDY)\n",
-		DRIVER_NAME, val32);
-
+	val32 = MCUFWDL_RDY;
 	ret = rtl8188eu_write_reg32(priv, REG_MCUFWDL, val32);
 	if (ret < 0)
 		return ret;
 
-	/* Reset 8051 to start firmware execution */
 	ret = rtl8188eu_reset_8051(priv);
 	if (ret < 0)
 		return ret;
-
-	/* Poll for firmware initialization complete (WINTINI_RDY bit) */
-	pr_info("%s: Waiting for firmware to initialize...\n", DRIVER_NAME);
 
 	for (retry = 0; retry < 200; retry++) {
 		ret = rtl8188eu_read_reg32(priv, REG_MCUFWDL, &val32);
@@ -1648,20 +1462,14 @@ static int rtl8188eu_fw_free_to_go(struct rtl8188eu_priv *priv)
 			return ret;
 
 		if (val32 & WINTINI_RDY) {
-			pr_info("%s: Firmware ready! (took %d ms)\n", DRIVER_NAME, retry);
+			pr_info("%s: Firmware ready (%d ms)\n", DRIVER_NAME, retry);
 			return 0;
-		}
-
-		if (retry % 20 == 19) {
-			pr_info("%s: Still waiting for firmware... (REG_MCUFWDL=0x%08x)\n",
-				DRIVER_NAME, val32);
 		}
 
 		msleep(1);
 	}
 
-	pr_warn("%s: Firmware didn't set WINTINI_RDY after 200ms (continuing anyway)\n", DRIVER_NAME);
-	pr_warn("%s: REG_MCUFWDL=0x%08x (expected bit 6 set for WINTINI_RDY)\n", DRIVER_NAME, val32);
+	pr_warn("%s: Firmware WINTINI_RDY timeout (continuing)\n", DRIVER_NAME);
 	/* Some chips/firmware versions don't set WINTINI_RDY reliably - continue anyway */
 	return 0;
 }
@@ -1673,23 +1481,11 @@ static int rtl8188eu_load_firmware(struct rtl8188eu_priv *priv)
 {
 	int ret;
 
-	pr_info("%s: Step 3: Loading firmware from disk: %s\n", DRIVER_NAME, FIRMWARE_NAME);
-
 	ret = request_firmware(&priv->fw, FIRMWARE_NAME, &priv->udev->dev);
 	if (ret) {
-		pr_err("%s: Failed to load firmware %s (error %d)\n",
+		pr_err("%s: Failed to load firmware %s: %d\n",
 		       DRIVER_NAME, FIRMWARE_NAME, ret);
 		return ret;
-	}
-
-	pr_info("%s: Firmware loaded from disk successfully\n", DRIVER_NAME);
-	pr_info("%s: Firmware size: %zu bytes\n", DRIVER_NAME, priv->fw->size);
-
-	if (priv->fw->size >= 4) {
-		pr_info("%s: Firmware header: %02x %02x %02x %02x\n",
-			DRIVER_NAME,
-			priv->fw->data[0], priv->fw->data[1],
-			priv->fw->data[2], priv->fw->data[3]);
 	}
 
 	/* Enable firmware download mode */
@@ -1720,9 +1516,7 @@ static int rtl8188eu_load_firmware(struct rtl8188eu_priv *priv)
 		return ret;
 	}
 
-	/* Wait for hardware to compute checksum after disabling download mode */
-	pr_info("%s: Waiting for hardware to compute firmware checksum...\n", DRIVER_NAME);
-	msleep(50);  /* Give hardware time to compute checksum */
+	msleep(50);
 
 	/* Verify firmware checksum */
 	ret = rtl8188eu_verify_fw_checksum(priv);
@@ -1732,8 +1526,6 @@ static int rtl8188eu_load_firmware(struct rtl8188eu_priv *priv)
 		/* Continue anyway - some chips don't set the checksum bit reliably */
 	}
 
-	/* Initialize H2C command interface BEFORE firmware activation - critical! */
-	pr_info("%s: Initializing H2C BEFORE firmware activation (correct timing!)\n", DRIVER_NAME);
 	ret = rtl8188eu_init_h2c(priv);
 	if (ret) {
 		pr_err("%s: H2C initialization failed: %d\n", DRIVER_NAME, ret);
@@ -1750,7 +1542,7 @@ static int rtl8188eu_load_firmware(struct rtl8188eu_priv *priv)
 		return ret;
 	}
 
-	pr_info("%s: Step 3 complete - firmware loaded, downloaded, and ACTIVATED with H2C!\n", DRIVER_NAME);
+	pr_info("%s: Firmware loaded and activated\n", DRIVER_NAME);
 
 	return 0;
 }
@@ -1770,43 +1562,23 @@ static int rtl8188eu_init_wmac_setting(struct rtl8188eu_priv *priv)
 	u32 rcr;
 	int ret;
 
-	pr_info("%s: Configuring WMAC RX settings...\n", DRIVER_NAME);
+	rcr = RCR_APM | RCR_AM | RCR_AB |
+	      RCR_CBSSID_DATA | RCR_CBSSID_BCN |
+	      RCR_APP_ICV | RCR_AMF | RCR_HTC_LOC_CTRL |
+	      RCR_APP_MIC | RCR_APP_PHYST_RXFF;
 
-	/* Configure RCR (Receive Configuration Register) */
-	/* This tells hardware what types of packets to accept */
-	rcr = RCR_APM |              /* Accept physical match (our MAC) */
-	      RCR_AM |               /* Accept multicast */
-	      RCR_AB |               /* Accept broadcast */
-	      RCR_CBSSID_DATA |      /* Accept BSSID match (data) */
-	      RCR_CBSSID_BCN |       /* Accept BSSID match (beacon) */
-	      RCR_APP_ICV |          /* Append ICV */
-	      RCR_AMF |              /* Accept management frames */
-	      RCR_HTC_LOC_CTRL |     /* HTC location control */
-	      RCR_APP_MIC |          /* Append MIC */
-	      RCR_APP_PHYST_RXFF;    /* Append PHY status to RX packets */
-
-	pr_info("%s: Setting RCR = 0x%08x\n", DRIVER_NAME, rcr);
 	ret = rtl8188eu_write_reg32(priv, REG_RCR, rcr);
-	if (ret < 0) {
-		pr_err("%s: Failed to set RCR register: %d\n", DRIVER_NAME, ret);
+	if (ret < 0)
 		return ret;
-	}
 
-	/* Set multicast filter to accept all multicast packets */
-	pr_info("%s: Setting multicast filters (MAR) to accept all\n", DRIVER_NAME);
 	ret = rtl8188eu_write_reg32(priv, REG_MAR, 0xFFFFFFFF);
-	if (ret < 0) {
-		pr_err("%s: Failed to set MAR register: %d\n", DRIVER_NAME, ret);
+	if (ret < 0)
 		return ret;
-	}
-
 	ret = rtl8188eu_write_reg32(priv, REG_MAR + 4, 0xFFFFFFFF);
-	if (ret < 0) {
-		pr_err("%s: Failed to set MAR+4 register: %d\n", DRIVER_NAME, ret);
+	if (ret < 0)
 		return ret;
-	}
 
-	pr_info("%s: WMAC RX configuration complete\n", DRIVER_NAME);
+	pr_debug("%s: WMAC configured (RCR=0x%08x)\n", DRIVER_NAME, rcr);
 	return 0;
 }
 
@@ -1824,55 +1596,26 @@ static int rtl8188eu_set_monitor_mode(struct rtl8188eu_priv *priv, bool enable)
 	u32 rcr;
 	int ret;
 
-	pr_info("%s: %s monitor mode\n", DRIVER_NAME, enable ? "Enabling" : "Disabling");
-
 	if (enable) {
-		/* Monitor mode - accept ALL packets */
-		rcr = RCR_AAP |              /* Accept all unicast packets */
-		      RCR_APM |              /* Accept physical match */
-		      RCR_AM |               /* Accept multicast */
-		      RCR_AB |               /* Accept broadcast */
-		      RCR_APWRMGT |          /* Accept power management frames */
-		      RCR_ADF |              /* Accept data frames */
-		      RCR_ACF |              /* Accept control frames (ACK, RTS, CTS) */
-		      RCR_AMF |              /* Accept management frames (beacon, probe) */
-		      RCR_ACRC32 |           /* Accept CRC errors (for analysis) */
-		      RCR_APP_PHYST_RXFF |   /* Append PHY status (signal strength) */
-		      RCR_APP_ICV |          /* Keep ICV */
-		      RCR_APP_MIC |          /* Keep MIC */
-		      RCR_APPFCS;            /* Append FCS */
+		rcr = RCR_AAP | RCR_APM | RCR_AM | RCR_AB |
+		      RCR_APWRMGT | RCR_ADF | RCR_ACF | RCR_AMF |
+		      RCR_ACRC32 | RCR_APP_PHYST_RXFF |
+		      RCR_APP_ICV | RCR_APP_MIC | RCR_APPFCS;
 
-		pr_info("%s: RCR = 0x%08x (monitor mode)\n", DRIVER_NAME, rcr);
-
-		/* Accept ALL multicast addresses */
 		ret = rtl8188eu_write_reg32(priv, REG_MAR, 0xFFFFFFFF);
 		if (ret < 0)
 			return ret;
 		ret = rtl8188eu_write_reg32(priv, REG_MAR + 4, 0xFFFFFFFF);
 		if (ret < 0)
 			return ret;
-
-		/* Accept all data frame subtypes */
 		ret = rtl8188eu_write_reg16(priv, REG_RXFLTMAP2, 0xFFFF);
 		if (ret < 0)
 			return ret;
-
-		pr_info("%s: Monitor mode enabled - accepting all packets (RXFLTMAP2=0xFFFF)\n", DRIVER_NAME);
 	} else {
-		/* Normal mode - selective reception */
-		rcr = RCR_APM |              /* Accept physical match */
-		      RCR_AM |               /* Accept multicast */
-		      RCR_AB |               /* Accept broadcast */
-		      RCR_CBSSID_DATA |      /* Accept BSSID match (data) */
-		      RCR_CBSSID_BCN |       /* Accept BSSID match (beacon) */
-		      RCR_APP_ICV |          /* Keep ICV */
-		      RCR_AMF |              /* Accept management frames */
-		      RCR_HTC_LOC_CTRL |     /* HTC location control */
-		      RCR_APP_MIC |          /* Keep MIC */
-		      RCR_APP_PHYST_RXFF;    /* Append PHY status */
-
-		pr_info("%s: RCR = 0x%08x (normal mode)\n", DRIVER_NAME, rcr);
-		pr_info("%s: Monitor mode disabled - selective reception\n", DRIVER_NAME);
+		rcr = RCR_APM | RCR_AM | RCR_AB |
+		      RCR_CBSSID_DATA | RCR_CBSSID_BCN |
+		      RCR_APP_ICV | RCR_AMF | RCR_HTC_LOC_CTRL |
+		      RCR_APP_MIC | RCR_APP_PHYST_RXFF;
 	}
 
 	/* Write RCR register */
@@ -1891,51 +1634,21 @@ static int rtl8188eu_set_monitor_mode(struct rtl8188eu_priv *priv, bool enable)
  */
 static int rtl8188eu_set_channel(struct rtl8188eu_priv *priv, u8 channel)
 {
-	u32 data;
-	int ret;
+	u32 rf_val;
 
 	if (channel < 1 || channel > 14) {
 		pr_err("%s: Invalid channel %d (must be 1-14)\n", DRIVER_NAME, channel);
 		return -EINVAL;
 	}
 
-	/*
-	 * Write channel to RF_CHNLBW register via baseband
-	 * Data format: ((RF_reg_addr << 20) | (rf_data & 0xfffff)) & 0xfffffff
-	 *
-	 * This writes to RF register 0x18 (RF_CHNLBW) via the baseband
-	 * RF interface register at 0x0860 (rFPGA0_XA_RFInterfaceOE).
-	 *
-	 * RF_CHNLBW register format (from old driver analysis):
-	 *   - Bits [9:0]: Channel number (1-14)
-	 *   - Bits [11:10]: Bandwidth (0xC00 = 20MHz, 0x400 = 40MHz)
-	 *   - Bits [19:12]: Other RF settings (power, calibration, etc.)
-	 *
-	 * Trying multiple values since we can't read the RF register:
-	 * 1. 0x18C06 = 20MHz bandwidth (bits 11:10 = 11) + channel 6
-	 * 2. Try with some typical high bits set
-	 */
-	u32 rf_data;
-	u32 attempts[] = {
-		0x00C00 | channel,
-		0x83C00 | channel,
-		0x8FC00 | channel
-	};
-	int i;
+	/* Read-modify-write RF_CHNLBW: preserve upper bits, set channel in [9:0] */
+	priv->rf_chnl_val = (priv->rf_chnl_val & 0xfffffc00) | channel;
+	rtl8188eu_write_rf_reg(priv, RF_PATH_A, RF_CHNLBW, bRFRegOffsetMask,
+			       priv->rf_chnl_val);
 
-	for (i = 0; i < ARRAY_SIZE(attempts); i++) {
-		rf_data = attempts[i] & bRFRegOffsetMask;
-		data = ((RF_CHNLBW << 20) | rf_data) & 0x0fffffff;
-
-		ret = rtl8188eu_write_reg32(priv, rFPGA0_XA_RFInterfaceOE, data);
-		if (ret < 0) {
-			pr_err("%s: Failed to write RF register (attempt %d): %d\n",
-			       DRIVER_NAME, i + 1, ret);
-			continue;
-		}
-
-		msleep(10);
-	}
+	/* Verify */
+	rf_val = rtl8188eu_read_rf_reg(priv, RF_PATH_A, RF_CHNLBW, bRFRegOffsetMask);
+	pr_debug("%s: RF_CHNLBW = 0x%05x after channel set\n", DRIVER_NAME, rf_val);
 
 	priv->channel = channel;
 	pr_info("%s: Channel set to %d (%d MHz)\n",
@@ -1988,9 +1701,8 @@ static void rtl8188eu_rx_complete(struct urb *urb)
 
 	rx_callback_count++;
 
-	/* Log first 10 callbacks for debugging */
-	if (rx_callback_count <= 10)
-		pr_info("%s: RX callback #%u: status=%d, actual_length=%d\n",
+	if (rx_callback_count <= 3)
+		pr_info("%s: RX callback #%u: status=%d, len=%d\n",
 			DRIVER_NAME, rx_callback_count, urb->status, urb->actual_length);
 
 	/* Handle URB errors */
@@ -2079,23 +1791,74 @@ static void rtl8188eu_rx_complete(struct urb *urb)
 			goto next_pkt;
 		}
 
-		/* Prepend radiotap header */
+		/* Parse rate from RX descriptor DW3 and signal from PHY status */
 		{
 			struct rtl8188eu_radiotap_hdr *rthdr;
+			u32 rxdw3 = le32_to_cpu(rx_desc->rxdw3);
+			u8 hw_rate = rxdw3 & 0x3f;
+			bool is_ht = (rxdw3 & BIT(6)) || (hw_rate >= 0x0c);
+			bool is_cck = (hw_rate <= 0x03);
+			s8 signal_dbm = -50;
+			u16 chan_flags = RTL_CHAN_2GHZ;
+
+			/* Parse PHY status for signal strength */
+			if ((rxdw0 & RX_DW0_PHYST) && drvinfo_sz >= 8) {
+				u8 *phy_status = pbuf + RXDESC_SIZE;
+
+				if (is_cck) {
+					u8 cck_agc = phy_status[5];
+					u8 lna_idx = (cck_agc >> 5) & 0x7;
+					u8 vga_idx = cck_agc & 0x1f;
+
+					signal_dbm = cck_lna_gain[lna_idx] - (2 * vga_idx);
+				} else {
+					signal_dbm = ((phy_status[4] >> 1) & 0x7f) - 110;
+				}
+
+				if (signal_dbm < -100)
+					signal_dbm = -100;
+				if (signal_dbm > 0)
+					signal_dbm = 0;
+
+				if (rx_total_packets < 10)
+					pr_info("%s: RX diag #%u: hw_rate=0x%02x is_cck=%d drvinfo=%u "
+						"physt=%d phy[0-7]=%02x %02x %02x %02x %02x %02x %02x %02x "
+						"signal=%d\n",
+						DRIVER_NAME, rx_total_packets, hw_rate, is_cck,
+						drvinfo_sz, !!(rxdw0 & RX_DW0_PHYST),
+						phy_status[0], phy_status[1], phy_status[2], phy_status[3],
+						phy_status[4], phy_status[5], phy_status[6], phy_status[7],
+						signal_dbm);
+			}
+
+			chan_flags |= is_cck ? RTL_CHAN_CCK : RTL_CHAN_OFDM;
 
 			rthdr = skb_put(skb, sizeof(*rthdr));
 			memset(rthdr, 0, sizeof(*rthdr));
 			rthdr->hdr.it_version = 0;
 			rthdr->hdr.it_len = cpu_to_le16(sizeof(*rthdr));
-			rthdr->hdr.it_present = cpu_to_le32(RTL8188EU_RADIOTAP_PRESENT);
 			rthdr->flags = 0;
-			rthdr->rate = 0x0c;
 			rthdr->chan_freq = cpu_to_le16(
 				rtl8188eu_chan_to_freq(priv->channel));
-			rthdr->chan_flags = cpu_to_le16(
-				RTL_CHAN_2GHZ | RTL_CHAN_OFDM);
-			rthdr->signal = -50;
+			rthdr->chan_flags = cpu_to_le16(chan_flags);
+			rthdr->signal = signal_dbm;
 			rthdr->antenna = 0;
+
+			if (is_ht) {
+				rthdr->hdr.it_present = cpu_to_le32(RTL8188EU_RADIOTAP_PRESENT);
+				rthdr->rate = 0;
+				rthdr->mcs_known = 0x07;
+				rthdr->mcs_flags = 0;
+				rthdr->mcs_index = hw_rate & 0x1f;
+			} else {
+				rthdr->hdr.it_present = cpu_to_le32(RTL8188EU_RADIOTAP_PRESENT
+					& ~(1 << IEEE80211_RADIOTAP_MCS));
+				rthdr->rate = (hw_rate < ARRAY_SIZE(rtl8188eu_hw_rate_to_radiotap))
+					? rtl8188eu_hw_rate_to_radiotap[hw_rate] : 12;
+				rthdr->mcs_known = 0;
+				rthdr->mcs_flags = 0;
+				rthdr->mcs_index = 0;
+			}
 		}
 
 		/* Copy 802.11 frame data after radiotap header */
@@ -2134,7 +1897,7 @@ next_pkt:
 resubmit:
 	/* Don't resubmit if interface is going down or device being removed */
 	if (!netif_running(netdev) || priv->disconnecting) {
-		pr_info("%s: RX URB not resubmitted (running=%d, disconnecting=%d)\n",
+		pr_debug("%s: RX URB not resubmitted (running=%d, disconnecting=%d)\n",
 			DRIVER_NAME, netif_running(netdev), priv->disconnecting);
 		return;
 	}
@@ -2143,8 +1906,8 @@ resubmit:
 	if (ret) {
 		pr_err("%s: RX URB resubmit failed: %d (status was %d, len=%d)\n",
 			DRIVER_NAME, ret, urb->status, urb->actual_length);
-	} else if (rx_callback_count <= 10) {
-		pr_info("%s: RX URB resubmitted OK (callback #%u)\n",
+	} else if (rx_callback_count <= 3) {
+		pr_debug("%s: RX URB resubmitted OK (callback #%u)\n",
 			DRIVER_NAME, rx_callback_count);
 	}
 }
@@ -2157,7 +1920,7 @@ static int rtl8188eu_start_rx(struct rtl8188eu_priv *priv)
 	unsigned int pipe;
 	int i, ret;
 
-	pr_info("%s: Starting RX with %d URBs...\n", DRIVER_NAME, RX_URB_COUNT);
+	pr_debug("%s: Starting RX with %d URBs\n", DRIVER_NAME, RX_URB_COUNT);
 
 	pipe = usb_rcvbulkpipe(priv->udev, priv->rx_endpoint);
 
@@ -2202,8 +1965,7 @@ static int rtl8188eu_start_rx(struct rtl8188eu_priv *priv)
 		}
 	}
 
-	pr_info("%s: RX started successfully (%d URBs active)\n",
-		DRIVER_NAME, RX_URB_COUNT);
+	pr_debug("%s: RX started (%d URBs)\n", DRIVER_NAME, RX_URB_COUNT);
 	return 0;
 
 err_free_urbs:
@@ -2228,7 +1990,7 @@ static void rtl8188eu_stop_rx(struct rtl8188eu_priv *priv)
 {
 	int i;
 
-	pr_info("%s: Stopping RX...\n", DRIVER_NAME);
+	pr_debug("%s: Stopping RX...\n", DRIVER_NAME);
 
 	for (i = 0; i < RX_URB_COUNT; i++) {
 		struct rtl8188eu_rx_urb *rx_urb = &priv->rx_urbs[i];
@@ -2243,7 +2005,7 @@ static void rtl8188eu_stop_rx(struct rtl8188eu_priv *priv)
 		rx_urb->buffer = NULL;
 	}
 
-	pr_info("%s: RX stopped\n", DRIVER_NAME);
+	pr_debug("%s: RX stopped\n", DRIVER_NAME);
 }
 
 /*
@@ -2270,15 +2032,9 @@ static int rtl8188eu_ndo_open(struct net_device *netdev)
 
 	/* Clear RW_RELEASE_EN - when set, RXDMA delivers one packet then stops */
 	ret = rtl8188eu_read_reg32(priv, REG_RXPKT_NUM, &val32);
-	if (ret == 0) {
-		pr_info("%s: REG_RXPKT_NUM before = 0x%08x (RW_RELEASE_EN=%d)\n",
-			DRIVER_NAME, val32, !!(val32 & RW_RELEASE_EN));
-		if (val32 & RW_RELEASE_EN) {
-			val32 &= ~RW_RELEASE_EN;
-			rtl8188eu_write_reg32(priv, REG_RXPKT_NUM, val32);
-			pr_info("%s: Cleared RW_RELEASE_EN, REG_RXPKT_NUM = 0x%08x\n",
-				DRIVER_NAME, val32);
-		}
+	if (ret == 0 && (val32 & RW_RELEASE_EN)) {
+		val32 &= ~RW_RELEASE_EN;
+		rtl8188eu_write_reg32(priv, REG_RXPKT_NUM, val32);
 	}
 
 	/* Start RX operations - submit URBs */
@@ -2302,34 +2058,6 @@ static int rtl8188eu_ndo_open(struct net_device *netdev)
 		pr_err("%s: Failed to set channel: %d\n", DRIVER_NAME, ret);
 		rtl8188eu_stop_rx(priv);
 		return ret;
-	}
-
-	/* Diagnostic register dump - verify hardware state */
-	{
-		u32 diag32;
-		u16 diag16;
-
-		pr_info("%s: === RX Diagnostic Register Dump ===\n", DRIVER_NAME);
-
-		if (rtl8188eu_read_reg16(priv, REG_CR, &diag16) == 0)
-			pr_info("%s:   REG_CR (0x0100) = 0x%04x\n", DRIVER_NAME, diag16);
-
-		if (rtl8188eu_read_reg32(priv, rFPGA0_RFMOD, &diag32) == 0)
-			pr_info("%s:   rFPGA0_RFMOD (0x800) = 0x%08x\n", DRIVER_NAME, diag32);
-
-		if (rtl8188eu_read_reg32(priv, REG_RCR, &diag32) == 0)
-			pr_info("%s:   REG_RCR (0x0608) = 0x%08x\n", DRIVER_NAME, diag32);
-
-		if (rtl8188eu_read_reg32(priv, REG_RXDMA_AGG_PG_TH, &diag32) == 0)
-			pr_info("%s:   RXDMA_AGG_PG_TH (0x0280) = 0x%08x\n", DRIVER_NAME, diag32);
-
-		if (rtl8188eu_read_reg16(priv, REG_TRXDMA_CTRL, &diag16) == 0)
-			pr_info("%s:   TRXDMA_CTRL (0x010C) = 0x%04x\n", DRIVER_NAME, diag16);
-
-		if (rtl8188eu_read_reg16(priv, REG_RXFLTMAP2, &diag16) == 0)
-			pr_info("%s:   RXFLTMAP2 (0x06A4) = 0x%04x\n", DRIVER_NAME, diag16);
-
-		pr_info("%s: === End Diagnostic Dump ===\n", DRIVER_NAME);
 	}
 
 	/* Enable TX queue */
@@ -2386,13 +2114,9 @@ static void rtl8188eu_tx_complete(struct urb *urb)
 	struct net_device *netdev = priv->netdev;
 	struct sk_buff *skb = ctx->skb;
 
-	/* Check URB status */
 	if (urb->status == 0) {
-		/* Success - update statistics */
 		netdev->stats.tx_packets++;
 		netdev->stats.tx_bytes += skb->len;
-		pr_info("%s: TX packet sent successfully (%d bytes)\n",
-			DRIVER_NAME, skb->len);
 	} else {
 		/* Error - update error statistics */
 		netdev->stats.tx_errors++;
@@ -2516,9 +2240,6 @@ static netdev_tx_t rtl8188eu_ndo_start_xmit(struct sk_buff *skb,
 		return NETDEV_TX_OK;
 	}
 
-	pr_info("%s: TX packet submitted (payload=%d, total=%u bytes)\n",
-		DRIVER_NAME, skb->len, total_len);
-
 	return NETDEV_TX_OK;
 }
 
@@ -2619,7 +2340,7 @@ static int rtl8188eu_netdev_init(struct rtl8188eu_priv *priv)
 {
 	struct net_device *netdev;
 
-	pr_info("%s: Initializing network device...\n", DRIVER_NAME);
+	pr_debug("%s: Initializing network device\n", DRIVER_NAME);
 
 	/* Allocate ethernet device (no extra private data) */
 	netdev = alloc_etherdev(0);
@@ -2650,7 +2371,7 @@ static int rtl8188eu_netdev_init(struct rtl8188eu_priv *priv)
 	/* Link back to our private data */
 	netdev->ml_priv = priv;  /* Use ml_priv to store our priv pointer */
 
-	pr_info("%s: Network device initialized successfully\n", DRIVER_NAME);
+	pr_debug("%s: Network device initialized\n", DRIVER_NAME);
 	return 0;
 }
 
@@ -2661,9 +2382,6 @@ static int rtl8188eu_register_netdev(struct rtl8188eu_priv *priv)
 {
 	int ret;
 
-	pr_info("%s: Registering network device...\n", DRIVER_NAME);
-	pr_info("%s: MAC Address: %pM\n", DRIVER_NAME, priv->mac_addr);
-
 	ret = register_netdev(priv->netdev);
 	if (ret < 0) {
 		pr_err("%s: Failed to register network device: %d\n",
@@ -2671,11 +2389,8 @@ static int rtl8188eu_register_netdev(struct rtl8188eu_priv *priv)
 		return ret;
 	}
 
-	pr_info("%s: ========================================\n", DRIVER_NAME);
-	pr_info("%s: Network device registered as: %s\n",
-		DRIVER_NAME, priv->netdev->name);
-	pr_info("%s: Interface is now visible in 'ip link'\n", DRIVER_NAME);
-	pr_info("%s: ========================================\n", DRIVER_NAME);
+	pr_info("%s: Registered as %s (MAC %pM)\n",
+		DRIVER_NAME, priv->netdev->name, priv->mac_addr);
 
 	return 0;
 }
@@ -2692,25 +2407,18 @@ static int rtl8188eu_detect_endpoints(struct rtl8188eu_priv *priv)
 	int i;
 	int tx_ep_count = 0;
 
-	pr_info("%s: Detecting USB endpoints...\n", DRIVER_NAME);
-
 	iface_desc = intf->cur_altsetting;
 
 	for (i = 0; i < iface_desc->desc.bNumEndpoints; i++) {
 		endpoint = &iface_desc->endpoint[i].desc;
 
-		if (usb_endpoint_is_bulk_in(endpoint)) {
+		if (usb_endpoint_is_bulk_in(endpoint))
 			priv->rx_endpoint = endpoint->bEndpointAddress;
-			pr_info("%s: Found RX endpoint: 0x%02x\n",
-				DRIVER_NAME, priv->rx_endpoint);
-		}
 
 		if (usb_endpoint_is_bulk_out(endpoint)) {
 			if (tx_ep_count == 0)
 				priv->tx_endpoint = endpoint->bEndpointAddress;
 			tx_ep_count++;
-			pr_info("%s: Found TX endpoint #%d: 0x%02x\n",
-				DRIVER_NAME, tx_ep_count, endpoint->bEndpointAddress);
 		}
 	}
 
@@ -2734,8 +2442,8 @@ static int rtl8188eu_detect_endpoints(struct rtl8188eu_priv *priv)
 		break;
 	}
 
-	pr_info("%s: USB endpoints: %d TX EPs, queue_sel=0x%02x\n",
-		DRIVER_NAME, tx_ep_count, priv->out_ep_queue_sel);
+	pr_debug("%s: USB endpoints: RX=0x%02x TX=0x%02x (%d TX EPs)\n",
+		DRIVER_NAME, priv->rx_endpoint, priv->tx_endpoint, tx_ep_count);
 	return 0;
 }
 
@@ -2749,13 +2457,9 @@ static int rtl8188eu_init_queue_priority(struct rtl8188eu_priv *priv)
 	u16 value16;
 	int ret;
 
-	pr_info("%s: Setting queue priority mapping...\n", DRIVER_NAME);
-
 	ret = rtl8188eu_read_reg16(priv, REG_TRXDMA_CTRL, &value16);
 	if (ret < 0)
 		return ret;
-
-	pr_info("%s: TRXDMA_CTRL before = 0x%04x\n", DRIVER_NAME, value16);
 
 	value16 &= 0x0007;
 	value16 |= _TXDMA_HIQ_MAP(QUEUE_HIGH) |
@@ -2769,8 +2473,7 @@ static int rtl8188eu_init_queue_priority(struct rtl8188eu_priv *priv)
 	if (ret < 0)
 		return ret;
 
-	pr_info("%s: TRXDMA_CTRL set to 0x%04x (queue priority mapped)\n",
-		DRIVER_NAME, value16);
+	pr_debug("%s: TRXDMA_CTRL=0x%04x\n", DRIVER_NAME, value16);
 	return 0;
 }
 
@@ -2792,8 +2495,7 @@ static int rtl8188eu_init_hw_drop_incorrect_bulkout(struct rtl8188eu_priv *priv)
 	if (ret < 0)
 		return ret;
 
-	pr_info("%s: HW drop incorrect bulk-out enabled (0x%04x = 0x%08x)\n",
-		DRIVER_NAME, REG_TXDMA_OFFSET_CHK, value32);
+	pr_debug("%s: HW drop incorrect bulk-out enabled\n", DRIVER_NAME);
 	return 0;
 }
 
@@ -2823,8 +2525,7 @@ static int rtl8188eu_init_tx_report(struct rtl8188eu_priv *priv)
 	if (ret < 0)
 		return ret;
 
-	pr_info("%s: TX report configured (ctrl=0x%02x, time=0xCDF0)\n",
-		DRIVER_NAME, val8);
+	pr_debug("%s: TX report configured\n", DRIVER_NAME);
 	return 0;
 }
 
@@ -2845,17 +2546,8 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 	int ret;
 	u8 val8;
 
-	pr_info("%s: ========================================\n", DRIVER_NAME);
-	pr_info("%s: Step 1: USB Device Detection\n", DRIVER_NAME);
-	pr_info("%s: RTL8188EUS device detected!\n", DRIVER_NAME);
-	pr_info("%s: USB Device - Vendor: 0x%04x, Product: 0x%04x\n",
-		DRIVER_NAME,
-		le16_to_cpu(udev->descriptor.idVendor),
-		le16_to_cpu(udev->descriptor.idProduct));
-	pr_info("%s: Bus number: %d, Device number: %d\n",
-		DRIVER_NAME,
-		udev->bus->busnum,
-		udev->devnum);
+	pr_info("%s: RTL8188EUS detected (bus %d, dev %d)\n",
+		DRIVER_NAME, udev->bus->busnum, udev->devnum);
 
 	/* Allocate private data structure */
 	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
@@ -2869,17 +2561,12 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 	priv->chip_powered_on = false;
 	mutex_init(&priv->rf_read_mutex);
 
-	/* Initialize hardware configuration for USB interface */
 	priv->hw_cfg.interface_type = 1;  /* USB interface */
-	priv->hw_cfg.board_type = 0;      /* Default board type */
-	priv->hw_cfg.cut_version = 0;     /* Default cut version */
-	priv->hw_cfg.package_type = 0;    /* Default package */
-	pr_info("%s: Hardware config: USB interface (type=%d)\n",
-		DRIVER_NAME, priv->hw_cfg.interface_type);
+	priv->hw_cfg.board_type = 0;
+	priv->hw_cfg.cut_version = 0;
+	priv->hw_cfg.package_type = 0;
 
 	usb_set_intfdata(intf, priv);
-
-	pr_info("%s: Step 1 complete - device detected\n", DRIVER_NAME);
 
 	/* Detect USB endpoints for Phase 2 */
 	ret = rtl8188eu_detect_endpoints(priv);
@@ -2895,75 +2582,43 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 		goto err_free_priv;
 	}
 
-	/* Step 2: Power on chip (MUST be done BEFORE firmware!) */
 	ret = rtl8188eu_power_on(priv);
-	if (ret) {
-		pr_err("%s: Step 2 failed - power on error\n", DRIVER_NAME);
+	if (ret)
 		goto err_free_priv;
-	}
 
-	/* Step 2.5: Enable MCU clocks for firmware operation */
 	ret = rtl8188eu_enable_mcu_clocks(priv);
-	if (ret) {
-		pr_err("%s: Failed to enable MCU clocks\n", DRIVER_NAME);
+	if (ret)
 		goto err_free_priv;
-	}
 
-	/*
-	 * ============================================================
-	 * INIT SEQUENCE (v0.28) - Matching old driver order
-	 * ============================================================
-	 * 1. Queue reserved pages + page boundary + TX boundary
-	 * 2. Queue priority (TRXDMA_CTRL mapping)
-	 * 3. LLT table
-	 * 4. Firmware download
-	 * 5. MAC register table (BEFORE PHY!)
-	 * 6. BB/RF enable + PHY tables + calibration
-	 * 7. Post-PHY: CCK/OFDM, WMAC, USB AGG, MAC TX/RX, etc.
-	 * ============================================================
-	 */
-
-	/* Step 3: Set up TX/RX queues (BEFORE firmware - matches old driver) */
+	/* TX/RX queues (BEFORE firmware) */
 	ret = rtl8188eu_init_tx_rx_queues(priv);
 	if (ret) {
 		pr_err("%s: TX/RX queue setup failed: %d\n", DRIVER_NAME, ret);
 		goto err_free_priv;
 	}
 
-	/* Step 3a: Queue priority mapping (TRXDMA_CTRL) */
 	ret = rtl8188eu_init_queue_priority(priv);
 	if (ret)
 		pr_warn("%s: Queue priority init failed: %d\n", DRIVER_NAME, ret);
 
-	/* Step 3b: LLT table */
 	ret = rtl8188eu_init_llt_table(priv);
-	if (ret) {
-		pr_err("%s: LLT init failed: %d\n", DRIVER_NAME, ret);
+	if (ret)
 		goto err_free_priv;
-	}
 
-	/* Step 4: Load and activate firmware */
 	ret = rtl8188eu_load_firmware(priv);
-	if (ret) {
-		pr_err("%s: Firmware load failed: %d\n", DRIVER_NAME, ret);
+	if (ret)
 		goto err_free_priv;
-	}
 
-	/* Step 5: MAC register table (BEFORE PHY - matches old driver!) */
-	pr_info("%s: Loading MAC register table (before PHY)...\n", DRIVER_NAME);
 	ret = rtl8188eu_load_mac_reg_table(priv);
 	if (ret)
 		pr_warn("%s: MAC register table failed: %d\n", DRIVER_NAME, ret);
 
-	/* Step 6: Initialize interrupts */
 	ret = rtl8188eu_init_interrupts(priv);
 	if (ret)
 		pr_warn("%s: Interrupt init failed: %d\n", DRIVER_NAME, ret);
 
-	/* Step 7: RX driver info size (4 units x 8 bytes = 32 bytes) */
 	rtl8188eu_write_reg8(priv, REG_RX_DRVINFO_SZ, 0x04);
 
-	/* Step 8: Network type to AP (for monitor mode) */
 	{
 		u32 cr32;
 		ret = rtl8188eu_read_reg32(priv, REG_CR, &cr32);
@@ -2973,21 +2628,15 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 		}
 	}
 
-	/* Step 9: WMAC settings (RCR + multicast filter) */
 	ret = rtl8188eu_init_wmac_setting(priv);
 	if (ret)
 		pr_warn("%s: WMAC init failed: %d\n", DRIVER_NAME, ret);
 
-	/* Step 10: MAC registers (EDCA, SIFS, retry, rates, beacon) */
 	ret = rtl8188eu_init_mac_regs(priv);
 	if (ret)
 		pr_warn("%s: MAC register init failed: %d\n", DRIVER_NAME, ret);
 
-	pr_info("%s: ========================================\n", DRIVER_NAME);
-	pr_info("%s: Starting PHY Init (BB + RF + Calibration)\n", DRIVER_NAME);
-	pr_info("%s: ========================================\n", DRIVER_NAME);
-
-	/* Step 11: AFE (Analog Front End) - CRITICAL for BB/RF clock */
+	/* AFE (Analog Front End) - CRITICAL for BB/RF clock */
 	ret = rtl8188eu_write_reg32(priv, REG_AFE_XTAL_CTRL, 0x000F81FB);
 	if (ret == 0)
 		msleep(5);
@@ -3002,7 +2651,7 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 		}
 	}
 
-	/* Step 12: Enable BB (25.1MHz clock + reset bits) */
+	/* Enable BB (25.1MHz clock + reset bits) */
 	{
 		u16 sys_func;
 		ret = rtl8188eu_read_reg16(priv, REG_SYS_FUNC_EN, &sys_func);
@@ -3013,20 +2662,7 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 		}
 	}
 
-	/* Step 13: Verify BB accessible */
-	{
-		u32 bb_test_val;
-		ret = rtl8188eu_read_reg32(priv, 0x800, &bb_test_val);
-		if (ret == 0) {
-			if (bb_test_val == 0xeaeaeaea)
-				pr_err("%s: BB not responding (0xEAEAEAEA)\n", DRIVER_NAME);
-			else
-				pr_info("%s: BB accessible (0x800 = 0x%08x)\n",
-					DRIVER_NAME, bb_test_val);
-		}
-	}
-
-	/* Step 14: Enable RF interface */
+	/* Enable RF interface */
 	{
 		u8 rf_ctrl;
 		ret = rtl8188eu_read_reg8(priv, REG_RF_CTRL, &rf_ctrl);
@@ -3037,7 +2673,7 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 		}
 	}
 
-	/* Step 15: Load PHY tables (BB + AGC + RF) */
+	/* Load PHY tables (BB + AGC + RF) */
 	ret = rtl8188eu_phy_bb_config(priv);
 	if (ret)
 		pr_err("%s: BB config failed: %d\n", DRIVER_NAME, ret);
@@ -3054,47 +2690,27 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 
 		rf00 = rtl8188eu_read_rf_reg(priv, RF_PATH_A, 0x00, 0xFFFFF);
 		rf18 = rtl8188eu_read_rf_reg(priv, RF_PATH_A, 0x18, 0xFFFFF);
-		pr_info("%s: Post-RF: RF_REG 0x00 = 0x%05x (expect ~0x33E60)\n",
-			DRIVER_NAME, rf00);
-		pr_info("%s: Post-RF: RF_REG 0x18 = 0x%05x (channel/BW)\n",
-			DRIVER_NAME, rf18);
+		pr_debug("%s: Post-RF: RF 0x00=0x%05x RF 0x18=0x%05x\n",
+			DRIVER_NAME, rf00, rf18);
+
+		/* Cache RF_CHNLBW for channel switching */
+		priv->rf_chnl_val = rf18;
 	}
 
-	/* Step 16: RF Calibration */
 	rtl8188eu_lc_calibrate(priv);
 	rtl8188eu_iqk_calibrate(priv);
 
-	/* Post-calibration RF diagnostic — verify RF survived calibration */
-	{
-		u32 rf00;
-
-		rf00 = rtl8188eu_read_rf_reg(priv, RF_PATH_A, 0x00, 0xFFFFF);
-		pr_info("%s: Post-cal: RF_REG 0x00 = 0x%05x (expect 0x33e60)\n",
-			DRIVER_NAME, rf00);
-
-		if (rf00 == 0x00000)
-			pr_warn("%s: RF reads zero after calibration — RF read bug may persist\n",
-				DRIVER_NAME);
-	}
-
-	/* ===== POST-PHY INITIALIZATION ===== */
-	pr_info("%s: ========================================\n", DRIVER_NAME);
-	pr_info("%s: Post-PHY Initialization\n", DRIVER_NAME);
-	pr_info("%s: ========================================\n", DRIVER_NAME);
-
-	/* Step 17: Enable CCK + OFDM in BB (read-modify-write to preserve PHY table bits) */
+	/* Enable CCK + OFDM in BB */
 	{
 		u32 rfmod;
 		ret = rtl8188eu_read_reg32(priv, rFPGA0_RFMOD, &rfmod);
 		if (ret == 0) {
-			pr_info("%s: rFPGA0_RFMOD before CCK/OFDM = 0x%08x\n", DRIVER_NAME, rfmod);
 			rfmod |= bCCKEn | bOFDMEn;
 			rtl8188eu_write_reg32(priv, rFPGA0_RFMOD, rfmod);
-			pr_info("%s: rFPGA0_RFMOD after CCK/OFDM = 0x%08x\n", DRIVER_NAME, rfmod);
 		}
 	}
 
-	/* Step 18: USB Aggregation (CRITICAL for RX!) */
+	/* USB Aggregation (CRITICAL for RX!) */
 	rtl8188eu_write_reg8(priv, 0x280, 0x30);
 	rtl8188eu_write_reg8(priv, 0x281, 0x04);
 
@@ -3106,15 +2722,6 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 		rtl8188eu_write_reg8(priv, REG_TRXDMA_CTRL, val8);
 	}
 
-	/* Verify full TRXDMA_CTRL value */
-	{
-		u16 trxdma;
-		ret = rtl8188eu_read_reg16(priv, REG_TRXDMA_CTRL, &trxdma);
-		if (ret == 0)
-			pr_info("%s: TRXDMA_CTRL = 0x%04x (expected ~0xFAF4)\n",
-				DRIVER_NAME, trxdma);
-	}
-
 	/* USB special option */
 	ret = rtl8188eu_read_reg8(priv, REG_USB_SPECIAL_OPTION, &val8);
 	if (ret == 0) {
@@ -3122,7 +2729,7 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 		rtl8188eu_write_reg8(priv, REG_USB_SPECIAL_OPTION, val8);
 	}
 
-	/* Step 19: Enable MAC TX/RX */
+	/* Enable MAC TX/RX */
 	{
 		u16 cr_val;
 		ret = rtl8188eu_read_reg16(priv, REG_CR, &cr_val);
@@ -3130,22 +2737,14 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 			cr_val |= CR_MACTXEN | CR_MACRXEN |
 				  CR_HCI_TXDMA_EN | CR_TXDMA_EN;
 			rtl8188eu_write_reg16(priv, REG_CR, cr_val);
-			pr_info("%s: MAC TX/RX enabled (REG_CR = 0x%04x)\n",
-				DRIVER_NAME, cr_val);
 		}
 	}
 
-	/* Step 20: Hardware drop incorrect bulk-out */
 	rtl8188eu_init_hw_drop_incorrect_bulkout(priv);
-
-	/* Step 21: TX report config */
 	rtl8188eu_init_tx_report(priv);
-
-	/* Step 22: Max aggregation number (USB = 0x07 for both bytes) */
 	rtl8188eu_write_reg16(priv, REG_MAX_AGGR_NUM, 0x0707);
-	pr_info("%s: MAX_AGGR_NUM set to 0x0707\n", DRIVER_NAME);
 
-	/* Step 23: RF front-end configuration (read-modify-write to preserve PHY table bits) */
+	/* RF front-end configuration */
 	{
 		u32 ee8_val;
 		ret = rtl8188eu_read_reg32(priv, 0xEE8, &ee8_val);
@@ -3156,7 +2755,7 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 	}
 	rtl8188eu_write_reg32(priv, 0x87C, 0x00000000);
 
-	/* Step 24: Default TX power levels */
+	/* Default TX power levels */
 	rtl8188eu_write_reg32(priv, 0xE00, 0x2D2D2D2D);
 	rtl8188eu_write_reg32(priv, 0xE04, 0x2D2D2D2D);
 	rtl8188eu_write_reg32(priv, 0xE08, 0x2626262A);
@@ -3164,11 +2763,9 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 
 	msleep(50);
 
-	pr_info("%s: ========================================\n", DRIVER_NAME);
-	pr_info("%s: Init complete! Registering network device\n", DRIVER_NAME);
-	pr_info("%s: ========================================\n", DRIVER_NAME);
+	pr_info("%s: Init complete\n", DRIVER_NAME);
 
-	/* Step 25: Register network device */
+	/* Register network device */
 	ret = rtl8188eu_register_netdev(priv);
 	if (ret) {
 		pr_err("%s: Failed to register network device\n", DRIVER_NAME);
@@ -3194,35 +2791,24 @@ static void rtl8188eu_disconnect(struct usb_interface *intf)
 {
 	struct rtl8188eu_priv *priv = usb_get_intfdata(intf);
 
-	pr_info("%s: RTL8188EUS device disconnected\n", DRIVER_NAME);
-
 	if (!priv)
 		return;
 
-	/* Prevent new TX/RX operations immediately */
 	priv->disconnecting = true;
 
 	if (priv->netdev) {
-		/* Detach from network stack first - stops new TX packets */
 		netif_device_detach(priv->netdev);
-
-		/* Stop RX URBs before unregistering */
 		rtl8188eu_stop_rx(priv);
-
 		unregister_netdev(priv->netdev);
-		pr_info("%s: Network device unregistered\n", DRIVER_NAME);
 		free_netdev(priv->netdev);
-		pr_info("%s: Network device freed\n", DRIVER_NAME);
 	}
 
-	if (priv->fw) {
+	if (priv->fw)
 		release_firmware(priv->fw);
-		pr_info("%s: Firmware released\n", DRIVER_NAME);
-	}
 
 	usb_set_intfdata(intf, NULL);
 	kfree(priv);
-	pr_info("%s: Cleanup complete\n", DRIVER_NAME);
+	pr_info("%s: Disconnected\n", DRIVER_NAME);
 }
 
 /* USB Driver structure */
@@ -3240,18 +2826,11 @@ static int __init rtl8188eu_init(void)
 {
 	int ret;
 
-	pr_info("%s: ========================================\n", DRIVER_NAME);
-	pr_info("%s: Loading driver version %s\n", DRIVER_NAME, DRIVER_VERSION);
-	pr_info("%s: Target device: TP-Link TL-WN722N v2/v3 (USB ID: 2357:010c)\n", DRIVER_NAME);
-	pr_info("%s: ========================================\n", DRIVER_NAME);
+	pr_info("%s: v%s loaded\n", DRIVER_NAME, DRIVER_VERSION);
 
 	ret = usb_register(&rtl8188eu_driver);
-	if (ret) {
-		pr_err("%s: Failed to register USB driver: %d\n", DRIVER_NAME, ret);
-		return ret;
-	}
-
-	pr_info("%s: Driver registered successfully\n", DRIVER_NAME);
+	if (ret)
+		pr_err("%s: USB register failed: %d\n", DRIVER_NAME, ret);
 	return 0;
 }
 

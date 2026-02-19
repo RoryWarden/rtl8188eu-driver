@@ -1,6 +1,6 @@
 # RTL8188EU Driver Status - Feb 18, 2026
 
-## Version: 0.36 - Fix RF read address mask — monitor mode capture working!
+## Version: 0.37 - Real radiotap data, channel hopping fix, debug cleanup
 
 ---
 
@@ -48,7 +48,7 @@
 - RXDMA_AGG_EN enabled in TRXDMA_CTRL
 - RX DMA enabled in ndo_open, disabled in ndo_stop
 - URB resubmission working correctly
-- **Monitor mode capture working — beacons, probes, ACKs with radiotap headers (v0.36)**
+- **Monitor mode capture with real radiotap data — actual rates and signal strength (v0.37)**
 
 ### Driver Stability (SOLID)
 - No kernel panics
@@ -61,7 +61,6 @@
 ## What Doesn't Work Yet
 
 ### Not Yet Tested
-- Channel hopping
 - Extended continuous operation
 - Association / managed mode
 
@@ -70,12 +69,12 @@
 ## Current Interface State
 
 ```
-Interface: enxf2b05ccc2215 (changes each boot - random MAC)
+Interface: enx* (changes each boot - random MAC)
 State: UP, carrier ON
 Monitor Mode: ENABLED (RCR = 0xf000392f)
 Link type: IEEE802_11_RADIO (radiotap)
-tcpdump: 20 packets captured, 0 dropped
-Signal: -50dBm, 2437 MHz (ch1), 6.0 Mb/s
+Radiotap: real rate (CCK/OFDM/HT MCS), real signal (PHY status parsed)
+Channel hopping: RF read-modify-write on RF_CHNLBW
 ```
 
 ---
@@ -84,6 +83,7 @@ Signal: -50dBm, 2437 MHz (ch1), 6.0 Mb/s
 
 | Version | Date | Change |
 |---------|------|--------|
+| v0.37 | Feb 18 | Real radiotap data + channel hopping fix + debug cleanup |
 | v0.36 | Feb 18 | Fix RF read address mask (bLSSIReadAddress) — **MONITOR MODE WORKING!** |
 | v0.35 | Feb 17 | Fix PF_PACKET delivery (skb_reset_mac_header + radiotap header_ops) |
 | v0.34 | Feb 17 | Wireless extensions + radiotap headers for monitor mode |
@@ -114,7 +114,7 @@ Signal: -50dBm, 2437 MHz (ch1), 6.0 Mb/s
 
 ## Next Steps
 
-1. Test channel hopping
+1. Test v0.37 changes (radiotap accuracy, channel hopping, reduced dmesg)
 2. Test extended continuous operation
 3. Consider managed mode / association support
 
@@ -132,5 +132,5 @@ Signal: -50dBm, 2437 MHz (ch1), 6.0 Mb/s
 ---
 
 **Last Updated**: Feb 18, 2026
-**Version**: 0.36
-**Status**: Monitor mode packet capture fully working!
+**Version**: 0.37
+**Status**: Real radiotap data, channel hopping, clean dmesg output

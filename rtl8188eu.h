@@ -54,6 +54,7 @@ struct rtl8188eu_priv {
 
 	/* Radio state */
 	u8 channel;  /* Current WiFi channel (1-14) */
+	u32 rf_chnl_val;  /* Cached RF_CHNLBW register value */
 
 	/* Device state */
 	bool disconnecting;  /* Set during rmmod/disconnect to stop TX/RX */

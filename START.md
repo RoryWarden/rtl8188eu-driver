@@ -1,8 +1,8 @@
 # RTL8188EU Driver - Quick Start & Progress
 
 **Last Updated:** Feb 18, 2026
-**Current Version:** v0.36 (Fix RF read address mask — monitor mode capture working!)
-**Previous Version:** v0.35 (Fix packet delivery to PF_PACKET sockets for monitor mode)
+**Current Version:** v0.37.1 (Fix radiotap MCS flag + signal strength diagnostics)
+**Previous Version:** v0.37 (Real radiotap data, channel hopping fix, debug cleanup)
 
 ---
 
@@ -13,20 +13,65 @@
 - ✅ Network interface with TX/RX paths
 - ✅ Monitor mode RCR configured
 - ✅ TX: 17+ packets working
-- ✅ **Continuous RX: 10 callbacks, 9 packets received!**
+- ✅ **Continuous RX: 12,000+ callbacks, 3,700+ packets**
 - ✅ PHY layer + calibration complete
+- ✅ Radiotap headers with rate parsing (CCK/OFDM/HT)
+- ✅ Channel hopping works
 
-**Current Status (Feb 18, 2026 - v0.36 MONITOR MODE WORKING!):**
-- ✅ **v0.35:** Fix packet delivery to PF_PACKET sockets for monitor mode
-- ✅ **v0.36:** Fix RF read address mask (`bLSSIReadAddress` 0x07f80000 → 0x7f800000)
-  - Transposed hex digits caused RF reads to corrupt address field in reg 0x824
-  - RF 0x00 read after RF 0x18 would return 0x00000 (wrong register)
-  - LC cal RF readback now correct (0x33e60), removed safety net force-restore
-- ✅ **MILESTONE:** tcpdump captures 802.11 frames with radiotap headers!
-  - Beacons, probe requests, ACKs all visible
-  - Signal strength (-50dBm), frequency, data rate reported correctly
+**What doesn't work yet:**
+- ❌ Signal strength always -1 dBm (wrong LNA gain table or AGC parsing)
+- ❌ Only seeing CCK 1.0 Mb/s packets (no OFDM/HT captured yet)
+- ❌ No managed mode, no AP association, no scanning
+- ❌ No mac80211/cfg80211 integration
+- ❌ No WPA/security
+- ❌ No packet injection
+
+**Current Status (Feb 18, 2026 - v0.37.1):**
+- ✅ **v0.37:** Real radiotap data, channel hopping fix, debug cleanup
+- ✅ **v0.37.1:** Fix radiotap MCS flag + signal strength diagnostics
+  - Legacy CCK packets no longer falsely show "11n" in tcpdump
+  - Added diagnostic dump of first 10 packets' raw PHY status bytes
+  - Finding: phy[5]=0x20 → LNA_idx=1, VGA_idx=0 → -1 dBm
+  - Next: check chip cut_version for TSMC vs SMIC LNA table selection
 
 **Key Finding:** Conditional table parsing was the solution! AGC table had 266 PCI/SDIO-only entries!
+
+---
+
+## Completion Estimates
+
+### Monitor mode sniffer: ~40%
+What we have: basic packet capture with broken signal and only CCK rates.
+What's missing for a usable sniffer:
+- [ ] Correct signal strength (TSMC/SMIC table, new AGC mode check)
+- [ ] OFDM and HT rate capture (currently only 1.0 Mb/s CCK)
+- [ ] Packet injection (TX in monitor mode)
+- [ ] Proper channel scanning/hopping tool
+- [ ] Filter controls (frame type filtering)
+- [ ] Noise floor estimation
+- [ ] Multiple channel width support (HT20/HT40)
+
+### Full WiFi driver: ~15-20%
+What we have: raw hardware access, firmware, PHY init, basic RX/TX.
+What's missing for a real WiFi driver:
+- [ ] mac80211 subsystem integration (replaces our manual radiotap/wireless ext)
+- [ ] cfg80211 interface (nl80211 for modern userspace tools)
+- [ ] Station mode (associate with AP, MLME state machine)
+- [ ] Authentication (Open, WEP, WPA/WPA2/WPA3 handshake support)
+- [ ] Scanning (probe requests, scan results, BSS list)
+- [ ] Rate control algorithm (Minstrel or similar)
+- [ ] Power management (sleep/wake, dynamic PS)
+- [ ] Proper TX queues (QoS, WMM, EDCA parameters)
+- [ ] Fragmentation and defragmentation
+- [ ] A-MPDU / A-MSDU aggregation
+- [ ] RTS/CTS, ACK handling
+- [ ] Beacon processing
+- [ ] AP mode / SoftAP
+- [ ] P2P / Wi-Fi Direct
+- [ ] Regulatory domain handling
+- [ ] LED control
+- [ ] Suspend/resume
+- [ ] Proper error recovery
 
 ---
 
@@ -138,6 +183,31 @@
 - [x] Remove safety net force-restore of RF_AC (no longer needed)
 - [x] LC cal RF readback now correct (0x33e60)
 - [x] tcpdump captures 20 packets with full radiotap headers
+
+### Phase 22: Real radiotap data + channel hopping + debug cleanup (v0.37) ✅ COMPLETE
+- [x] Parse actual rate from RX descriptor DW3 (CCK/OFDM legacy + HT MCS)
+- [x] Parse signal strength from PHY status (OFDM path + CCK LNA/VGA lookup)
+- [x] Add MCS field to radiotap header for HT rates
+- [x] Fix channel hopping: proper RF read-modify-write of RF_CHNLBW register
+- [x] Cache RF_CHNLBW value after RF table load
+- [x] Debug cleanup: ~100 pr_info → pr_debug conversions
+- [x] Remove per-packet TX logging, reduce first-N RX logs from 10 to 3
+- [x] Remove unused variables from debug-cleaned functions
+- [x] Version bump to 0.37
+- [x] Build successful
+
+### Phase 23: Fix radiotap MCS flag + signal diagnostics (v0.37.1) ✅ COMPLETE
+- [x] Clear MCS bit from it_present for legacy (non-HT) packets
+- [x] tcpdump now shows "11b" not "11n" for CCK beacons
+- [x] Added diagnostic pr_info for first 10 packets (raw PHY status bytes)
+- [x] Diagnostic findings:
+  - All packets CCK (hw_rate=0x00), drvinfo=32 (correct), physt=1
+  - phy[5]=0xff → LNA_idx=7, VGA_idx=31 → -100 dBm (clamped, likely invalid)
+  - phy[5]=0x20 → LNA_idx=1, VGA_idx=0 → -1 dBm (wrong table or AGC mode)
+  - Old driver has TSMC table {29,20,12,3,-6,-15,-24,-33} vs our SMIC table
+  - Old driver checks cut_version to pick table — we don't check cut_version
+- [ ] **Next: determine chip cut_version (TSMC vs SMIC) and fix LNA table**
+- [ ] **Next: investigate why only CCK packets seen (no OFDM/HT)**
 
 ### Phase 11: RF Calibration ✅ FUNCTIONAL (RX working!)
 - [x] Research IQK (I/Q Calibration) implementation
@@ -346,7 +416,10 @@ Running in "safe mode" with no PHY init - device stable but RX non-functional
 - ✅ v0.34: **Wireless extensions + radiotap headers for monitor mode**
 - ✅ v0.35: **Fix PF_PACKET delivery (skb_reset_mac_header + radiotap header_ops)**
 - ✅ v0.36: **Fix RF read address mask (bLSSIReadAddress) — monitor mode capture working!**
-- 🎯 v1.0: **Continuous RX + monitor mode capture working (goal: capture WiFi networks!)**
+- ✅ v0.37: **Real radiotap data + channel hopping fix + debug cleanup**
+- ✅ v0.37.1: **Fix radiotap MCS flag (11b not 11n) + signal strength diagnostics**
+- 🔧 Next: **Fix signal strength (TSMC/SMIC LNA table) + investigate missing OFDM/HT**
+- 🎯 v1.0: **Usable monitor mode sniffer with correct signal + multi-rate capture**
 
 ---
 
@@ -472,13 +545,20 @@ Despite being in an apartment complex with heavy WiFi traffic, we only receive 1
 - [x] Network interface comes up ✅
 - [x] TX packets working (20+ sent) ✅
 - [x] Monitor mode enabled ✅
-- [x] **RX packets received** ✅ **Continuous! 10 callbacks, 9 packets (v0.33)**
+- [x] **RX packets received** ✅ **Continuous! 12,000+ callbacks, 3,700+ packets**
+- [x] Radiotap headers with correct rate field ✅
+- [x] Channel hopping works ✅
+- [ ] Signal strength broken (-1 dBm always)
+- [ ] Only CCK 1.0 Mb/s packets captured (no OFDM/HT)
 
-**Final goal:**
+**Original goals (monitor mode sniffer):**
 - [x] RX packets counter > 0 ✅ **ACHIEVED!**
-- [x] Continuous RX (more than 1 packet) ✅ **ACHIEVED v0.33! 10 callbacks!**
+- [x] Continuous RX (more than 1 packet) ✅ **ACHIEVED v0.33!**
 - [x] Monitor mode packet capture shows WiFi networks ✅ **ACHIEVED v0.36!**
 - [x] Can capture packets in monitor mode ✅ **ACHIEVED v0.36!**
+- [ ] Correct signal strength reporting
+- [ ] Multi-rate capture (OFDM + HT, not just CCK)
+- [ ] Usable with Wireshark/tcpdump for real analysis
 
 ---
 

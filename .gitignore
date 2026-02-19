@@ -17,6 +17,9 @@ modules.order
 *~
 .vscode/
 
+# Test scripts
+test*.sh
+
 # Claude Code
 .claude/
 CLAUDE.md

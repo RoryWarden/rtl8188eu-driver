@@ -100,7 +100,7 @@ void rtl8188eu_init_phy_reg_def(struct rtl8188eu_priv *priv)
 	priv->phy_reg_def[RF_PATH_A].rfLSSIReadBack = rFPGA0_XA_LSSIReadBack;
 	priv->phy_reg_def[RF_PATH_A].rfLSSIReadBackPi = TransceiverA_HSPI_Readback;
 
-	pr_info("PHY register definitions initialized\n");
+	pr_debug("PHY register definitions initialized\n");
 }
 EXPORT_SYMBOL(rtl8188eu_init_phy_reg_def);
 
@@ -269,7 +269,7 @@ int rtl8188eu_load_phy_reg_table(struct rtl8188eu_priv *priv)
 		return -ENOENT;
 	}
 
-	pr_info("Loading PHY_REG table with conditional parsing (%d values)\n", size);
+	pr_debug("Loading PHY_REG table (%d values)\n", size);
 
 	/* Process table with conditional handling */
 	i = 0;
@@ -355,7 +355,7 @@ int rtl8188eu_load_phy_reg_table(struct rtl8188eu_priv *priv)
 		i += 2;
 	}
 
-	pr_info("PHY_REG table loaded: %d registers written (USB-specific only)\n", count);
+	pr_info("PHY_REG: %d registers loaded\n", count);
 	return 0;
 }
 EXPORT_SYMBOL(rtl8188eu_load_phy_reg_table);
@@ -382,7 +382,7 @@ int rtl8188eu_load_agc_table(struct rtl8188eu_priv *priv)
 		return -ENOENT;
 	}
 
-	pr_info("Loading AGC table - FORCING ALL ENTRIES for RX fix (%d values)\n", size);
+	pr_debug("Loading AGC table (%d values)\n", size);
 
 	/* TEMPORARY: Load ALL AGC entries to fix RX
 	 * AGC is critical for RX gain control. With only 10 entries,
@@ -435,8 +435,7 @@ int rtl8188eu_load_agc_table(struct rtl8188eu_priv *priv)
 		}
 	}
 
-	pr_info("AGC table loaded: %d registers written, %d conditionals skipped\n",
-		count, skipped);
+	pr_info("AGC: %d registers loaded\n", count);
 	return 0;
 }
 EXPORT_SYMBOL(rtl8188eu_load_agc_table);
@@ -465,7 +464,7 @@ int rtl8188eu_load_radioa_table(struct rtl8188eu_priv *priv)
 		return -ENOENT;
 	}
 
-	pr_info("Loading RadioA table with conditional parsing (%d values)\n", size);
+	pr_debug("Loading RadioA table (%d values)\n", size);
 
 	/* Process table with conditional handling */
 	i = 0;
@@ -549,7 +548,7 @@ int rtl8188eu_load_radioa_table(struct rtl8188eu_priv *priv)
 		i += 2;
 	}
 
-	pr_info("RadioA table loaded: %d RF registers written (USB-specific only)\n", count);
+	pr_info("RadioA: %d RF registers loaded\n", count);
 	return 0;
 }
 EXPORT_SYMBOL(rtl8188eu_load_radioa_table);
@@ -575,8 +574,7 @@ int rtl8188eu_load_mac_reg_table(struct rtl8188eu_priv *priv)
 		return -ENOENT;
 	}
 
-	pr_info("Loading MAC register table (%d values, %d pairs)\n",
-		size, size / 2);
+	pr_debug("Loading MAC register table (%d pairs)\n", size / 2);
 
 	for (i = 0; i + 1 < size; i += 2) {
 		u32 addr = table[i];
@@ -587,7 +585,7 @@ int rtl8188eu_load_mac_reg_table(struct rtl8188eu_priv *priv)
 		udelay(1);
 	}
 
-	pr_info("MAC register table loaded: %d registers written\n", count);
+	pr_info("MAC: %d registers loaded\n", count);
 	return 0;
 }
 EXPORT_SYMBOL(rtl8188eu_load_mac_reg_table);
@@ -603,7 +601,7 @@ int rtl8188eu_phy_bb_config(struct rtl8188eu_priv *priv)
 {
 	int ret;
 
-	pr_info("=== Starting BB configuration ===\n");
+	pr_debug("Starting BB configuration\n");
 
 	/* Initialize PHY register definitions (for RF access) */
 	rtl8188eu_init_phy_reg_def(priv);
@@ -625,7 +623,7 @@ int rtl8188eu_phy_bb_config(struct rtl8188eu_priv *priv)
 		return ret;
 	}
 
-	pr_info("=== BB configuration complete ===\n");
+	pr_debug("BB configuration complete\n");
 	return 0;
 }
 EXPORT_SYMBOL(rtl8188eu_phy_bb_config);
@@ -641,9 +639,8 @@ int rtl8188eu_phy_rf_config(struct rtl8188eu_priv *priv)
 {
 	int ret;
 	u32 rfenv_save;
-	u32 tmp;
 
-	pr_info("=== Starting RF configuration ===\n");
+	pr_debug("Starting RF configuration\n");
 
 	/*
 	 * RF environment setup - matches old driver's phy_RF6052_Config_ParaFile()
@@ -652,30 +649,16 @@ int rtl8188eu_phy_rf_config(struct rtl8188eu_priv *priv)
 	 * important bits and potentially disconnected the RF data path.
 	 */
 
-	/* Step A: Save original RFENV from 0x870 (rfintfs), bit 4 */
 	rfenv_save = rtl8188eu_read_bb_reg(priv, 0x870, 0x10);
-	pr_info("RF env: 0x870 RFENV saved = %u\n", rfenv_save);
 
-	/* Step B: Enable RF_ENV output enable in 0x860 (rfintfe), bit 20 */
 	rtl8188eu_write_bb_reg(priv, 0x860, 0x100000, 0x1);
 	udelay(1);
-
-	/* Step C: Set RF_ENV output data high in 0x860 (rfintfo), bit 4 */
 	rtl8188eu_write_bb_reg(priv, 0x860, 0x10, 0x1);
 	udelay(1);
-
-	/* Step D: Configure 3-wire address length in 0x824, bit 10 = 0 */
 	rtl8188eu_write_bb_reg(priv, 0x824, 0x400, 0x0);
 	udelay(1);
-
-	/* Step E: Configure 3-wire data length in 0x824, bit 11 = 0 */
 	rtl8188eu_write_bb_reg(priv, 0x824, 0x800, 0x0);
 	udelay(1);
-
-	tmp = rtl8188eu_read_bb_reg(priv, 0x860, 0xFFFFFFFF);
-	pr_info("RF env: 0x860 after setup = 0x%08x\n", tmp);
-	tmp = rtl8188eu_read_bb_reg(priv, 0x870, 0xFFFFFFFF);
-	pr_info("RF env: 0x870 after setup = 0x%08x\n", tmp);
 
 	/* Load RadioA table */
 	ret = rtl8188eu_load_radioa_table(priv);
@@ -684,10 +667,9 @@ int rtl8188eu_phy_rf_config(struct rtl8188eu_priv *priv)
 		return ret;
 	}
 
-	/* Step F: Restore RFENV in 0x870, bit 4 */
 	rtl8188eu_write_bb_reg(priv, 0x870, 0x10, rfenv_save);
 
-	pr_info("=== RF configuration complete ===\n");
+	pr_debug("RF configuration complete\n");
 	return 0;
 }
 EXPORT_SYMBOL(rtl8188eu_phy_rf_config);
@@ -829,16 +811,14 @@ void rtl8188eu_lc_calibrate(struct rtl8188eu_priv *priv)
 	u32 lc_cal, rf_val, rf_amode = 0;
 	bool is_cont_tx;
 
-	pr_info("Starting LC calibration...\n");
+	pr_debug("Starting LC calibration\n");
 
 	/* Step 1: Check if we're in continuous TX mode */
 	tmp_reg = rtl8188eu_read_reg32_direct(priv, 0xd00) >> 24;  /* Read 0xd03 */
 	is_cont_tx = (tmp_reg & 0x70) != 0;
 
 	if (is_cont_tx) {
-		/* Continuous TX mode: save RF_AC, put RF in standby, disable TX */
 		rf_amode = rtl8188eu_read_rf_reg(priv, RF_PATH_A, 0x00, bRFRegOffsetMask);
-		pr_info("LC Cal: Continuous TX — saved RF_AC = 0x%05x\n", rf_amode);
 
 		rtl8188eu_write_reg32_direct(priv, 0xd00,
 			(rtl8188eu_read_reg32_direct(priv, 0xd00) & 0x00FFFFFF) |
@@ -847,14 +827,10 @@ void rtl8188eu_lc_calibrate(struct rtl8188eu_priv *priv)
 		rtl8188eu_write_rf_reg(priv, RF_PATH_A, 0x00, bRFRegOffsetMask,
 				       (rf_amode & 0x8FFFF) | 0x10000);
 	} else {
-		/* Packet TX mode (normal case during probe): just pause TX queues */
-		pr_info("LC Cal: Packet TX mode — pausing queues, not touching RF_AC\n");
 		rtl8188eu_write_reg8(priv, REG_TXPAUSE, 0xFF);
 	}
 
-	/* Step 2: Trigger LC calibration via RF reg 0x18 bit 15 */
 	lc_cal = rtl8188eu_read_rf_reg(priv, RF_PATH_A, RF_CHNLBW, bRFRegOffsetMask);
-	pr_info("LC Cal: RF 0x18 = 0x%05x\n", lc_cal);
 
 	rtl8188eu_write_rf_reg(priv, RF_PATH_A, RF_CHNLBW, bRFRegOffsetMask,
 				lc_cal | 0x08000);
@@ -874,14 +850,8 @@ void rtl8188eu_lc_calibrate(struct rtl8188eu_priv *priv)
 		rtl8188eu_write_reg8(priv, REG_TXPAUSE, 0x00);
 	}
 
-	/* Read back to verify RF is still alive */
-	rf_val = rtl8188eu_read_rf_reg(priv, RF_PATH_A, RF_CHNLBW, bRFRegOffsetMask);
-	pr_info("LC Cal: After calibration, RF 0x18 = 0x%05x\n", rf_val);
-
 	rf_val = rtl8188eu_read_rf_reg(priv, RF_PATH_A, RF_AC, bRFRegOffsetMask);
-	pr_info("LC Cal: RF 0x00 = 0x%05x (expect 0x33e60)\n", rf_val);
-
-	pr_info("LC calibration complete\n");
+	pr_info("LC calibration complete (RF 0x00=0x%05x)\n", rf_val);
 }
 EXPORT_SYMBOL(rtl8188eu_lc_calibrate);
 
@@ -1009,17 +979,17 @@ static int rtl8188eu_iqk_tx(struct rtl8188eu_priv *priv)
 	reg_e94 = rtl8188eu_read_reg32_direct(priv, 0xe94);
 	reg_e9c = rtl8188eu_read_reg32_direct(priv, 0xe9c);
 
-	pr_info("IQK TX: eac=0x%08x e94=0x%08x e9c=0x%08x\n",
+	pr_debug("IQK TX: eac=0x%08x e94=0x%08x e9c=0x%08x\n",
 		reg_eac, reg_e94, reg_e9c);
 
 	if (!(reg_eac & BIT(28)) &&
 	    (((reg_e94 & 0x03FF0000) >> 16) != 0x142) &&
 	    (((reg_e9c & 0x03FF0000) >> 16) != 0x42)) {
-		pr_info("IQK: TX calibration SUCCESS\n");
+		pr_debug("IQK TX OK\n");
 		return 0;
 	}
 
-	pr_err("IQK: TX calibration FAILED\n");
+	pr_debug("IQK TX failed\n");
 	return -1;
 }
 
@@ -1064,7 +1034,7 @@ static int rtl8188eu_iqk_rx(struct rtl8188eu_priv *priv)
 
 	reg_eac = rtl8188eu_read_reg32_direct(priv, 0xeac);
 	reg_ea4 = rtl8188eu_read_reg32_direct(priv, 0xea4);
-	pr_info("IQK RX1: eac=0x%08x ea4=0x%08x\n", reg_eac, reg_ea4);
+	pr_debug("IQK RX1: eac=0x%08x ea4=0x%08x\n", reg_eac, reg_ea4);
 
 	/* Use TX result for RX calibration */
 	u4tmp = 0x80007C00 | (reg_e94 & 0x3FF0000) | ((reg_e9c & 0x3FF0000) >> 16);
@@ -1093,16 +1063,16 @@ static int rtl8188eu_iqk_rx(struct rtl8188eu_priv *priv)
 
 	reg_eac = rtl8188eu_read_reg32_direct(priv, 0xeac);
 	reg_ea4 = rtl8188eu_read_reg32_direct(priv, 0xea4);
-	pr_info("IQK RX2: eac=0x%08x ea4=0x%08x\n", reg_eac, reg_ea4);
+	pr_debug("IQK RX2: eac=0x%08x ea4=0x%08x\n", reg_eac, reg_ea4);
 
 	if (!(reg_eac & BIT(27)) &&
 	    (((reg_ea4 & 0x03FF0000) >> 16) != 0x132) &&
 	    (((reg_eac & 0x03FF0000) >> 16) != 0x36)) {
-		pr_info("IQK: RX calibration SUCCESS\n");
+		pr_debug("IQK RX OK\n");
 		return 0;
 	}
 
-	pr_err("IQK: RX calibration FAILED\n");
+	pr_debug("IQK RX failed\n");
 	return -1;
 }
 
@@ -1124,30 +1094,18 @@ int rtl8188eu_iqk_calibrate(struct rtl8188eu_priv *priv)
 	int tx_result, rx_result;
 	int retry;
 
-	pr_info("========================================\n");
-	pr_info("Starting IQK calibration (v0.32 w/ save/restore)...\n");
-	pr_info("========================================\n");
+	pr_debug("Starting IQK calibration\n");
 
-	/* Step 1: Save all 29 registers */
 	iqk_save_adda(priv, adda_reg, adda_backup, 16);
 	iqk_save_mac(priv, mac_backup);
 	iqk_save_adda(priv, iqk_bb_reg, bb_backup, 9);
-	pr_info("IQK: Saved 16 ADDA + 4 MAC + 9 BB registers\n");
 
-	/* Step 2: Set ADDA path on (1T1R mode) */
 	iqk_set_adda(priv, 0x0bdb25a0);
-
-	/* Step 3: Save PI mode state from 0x820 bit 8 */
 	pi_mode_save = rtl8188eu_read_bb_reg(priv, 0x820, BIT(8));
-
-	/* Step 4: Switch to PI mode */
 	rtl8188eu_write_reg32_direct(priv, 0x820, 0x01000100);
 	rtl8188eu_write_reg32_direct(priv, 0x828, 0x01000100);
 
-	/* Step 5: MAC calibration settings */
 	iqk_config_mac(priv);
-
-	/* Step 6: BB setup for IQK */
 	rtl8188eu_write_bb_reg(priv, 0xa04, 0x0F000000, 0xf);
 	rtl8188eu_write_reg32_direct(priv, 0xc04, 0x03a05600);
 	rtl8188eu_write_reg32_direct(priv, 0xc08, 0x000800e4);
@@ -1158,9 +1116,8 @@ int rtl8188eu_iqk_calibrate(struct rtl8188eu_priv *priv)
 	rtl8188eu_write_bb_reg(priv, 0x864, BIT(10), 0);
 	rtl8188eu_write_reg32_direct(priv, 0xb68, 0x0f600000);
 
-	/* Step 7+8: Run TX and RX IQK with retries */
 	for (retry = 0; retry < 3; retry++) {
-		pr_info("IQK attempt %d/3...\n", retry + 1);
+		pr_debug("IQK attempt %d/3\n", retry + 1);
 
 		tx_result = rtl8188eu_iqk_tx(priv);
 		if (tx_result == 0) {
@@ -1171,16 +1128,11 @@ int rtl8188eu_iqk_calibrate(struct rtl8188eu_priv *priv)
 			}
 		}
 
-		if (retry < 2) {
-			pr_info("IQK failed, retrying...\n");
+		if (retry < 2)
 			msleep(50);
-		}
 	}
 
-	/* Step 9: Restore everything — disable IQK first */
 	rtl8188eu_write_reg32_direct(priv, 0xe28, 0x00000000);
-
-	/* Restore PI mode */
 	if (!pi_mode_save) {
 		rtl8188eu_write_reg32_direct(priv, 0x820,
 			rtl8188eu_read_reg32_direct(priv, 0x820) & ~BIT(8));
@@ -1188,19 +1140,12 @@ int rtl8188eu_iqk_calibrate(struct rtl8188eu_priv *priv)
 			rtl8188eu_read_reg32_direct(priv, 0x828) & ~BIT(8));
 	}
 
-	/* Restore all 29 registers */
 	iqk_restore(priv, adda_reg, adda_backup, 16);
-
-	/* Restore MAC: 0x522, 0x550, 0x551 as bytes, 0x040 as 32-bit */
 	rtl8188eu_write_reg8(priv, 0x522, (u8)(mac_backup[0] & 0xFF));
 	rtl8188eu_write_reg8(priv, 0x550, (u8)(mac_backup[1] & 0xFF));
 	rtl8188eu_write_reg8(priv, 0x551, (u8)((mac_backup[1] >> 8) & 0xFF));
 	rtl8188eu_write_reg32_direct(priv, 0x040, mac_backup[3]);
-
 	iqk_restore(priv, iqk_bb_reg, bb_backup, 9);
-	pr_info("IQK: Restored all 29 registers\n");
-
-	/* Step 10: Reset defaults */
 	rtl8188eu_write_reg32_direct(priv, 0x840, 0x00032ed3);
 	rtl8188eu_write_reg32_direct(priv, 0xe30, 0x01008c00);
 	rtl8188eu_write_reg32_direct(priv, 0xe34, 0x01008c00);
