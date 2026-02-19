@@ -1,6 +1,6 @@
-# RTL8188EU Driver Status - Feb 18, 2026
+# RTL8188EU Driver Status - Feb 19, 2026
 
-## Version: 0.37 - Real radiotap data, channel hopping fix, debug cleanup
+## Version: 0.38 - Fix signal strength + chip version detection
 
 ---
 
@@ -49,6 +49,7 @@
 - RX DMA enabled in ndo_open, disabled in ndo_stop
 - URB resubmission working correctly
 - **Monitor mode capture with real radiotap data — actual rates and signal strength (v0.37)**
+- **Fixed signal strength: use path AGC gain (byte 0) instead of stuck CCK AGC (byte 5) (v0.38)**
 
 ### Driver Stability (SOLID)
 - No kernel panics
@@ -83,6 +84,7 @@ Channel hopping: RF read-modify-write on RF_CHNLBW
 
 | Version | Date | Change |
 |---------|------|--------|
+| v0.38 | Feb 19 | Fix signal strength (byte 0 AGC) + chip version detection |
 | v0.37 | Feb 18 | Real radiotap data + channel hopping fix + debug cleanup |
 | v0.36 | Feb 18 | Fix RF read address mask (bLSSIReadAddress) — **MONITOR MODE WORKING!** |
 | v0.35 | Feb 17 | Fix PF_PACKET delivery (skb_reset_mac_header + radiotap header_ops) |
@@ -114,8 +116,8 @@ Channel hopping: RF read-modify-write on RF_CHNLBW
 
 ## Next Steps
 
-1. Test v0.37 changes (radiotap accuracy, channel hopping, reduced dmesg)
-2. Test extended continuous operation
+1. Verify signal strength varies per packet (-40 to -70 dBm for nearby APs)
+2. Investigate why only CCK 1.0 Mb/s packets captured (no OFDM/HT)
 3. Consider managed mode / association support
 
 ---
@@ -131,6 +133,6 @@ Channel hopping: RF read-modify-write on RF_CHNLBW
 
 ---
 
-**Last Updated**: Feb 18, 2026
-**Version**: 0.37
-**Status**: Real radiotap data, channel hopping, clean dmesg output
+**Last Updated**: Feb 19, 2026
+**Version**: 0.38
+**Status**: Fixed signal strength, chip version detection, clean dmesg output

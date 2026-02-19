@@ -1,8 +1,8 @@
 # RTL8188EU Driver - Quick Start & Progress
 
-**Last Updated:** Feb 18, 2026
-**Current Version:** v0.37.1 (Fix radiotap MCS flag + signal strength diagnostics)
-**Previous Version:** v0.37 (Real radiotap data, channel hopping fix, debug cleanup)
+**Last Updated:** Feb 19, 2026
+**Current Version:** v0.38 (Fix signal strength + chip version detection)
+**Previous Version:** v0.37.1 (Fix radiotap MCS flag + signal strength diagnostics)
 
 ---
 
@@ -19,20 +19,20 @@
 - ✅ Channel hopping works
 
 **What doesn't work yet:**
-- ❌ Signal strength always -1 dBm (wrong LNA gain table or AGC parsing)
+- ⏳ Signal strength fixed (byte 0 AGC gain) — needs testing
 - ❌ Only seeing CCK 1.0 Mb/s packets (no OFDM/HT captured yet)
 - ❌ No managed mode, no AP association, no scanning
 - ❌ No mac80211/cfg80211 integration
 - ❌ No WPA/security
 - ❌ No packet injection
 
-**Current Status (Feb 18, 2026 - v0.37.1):**
-- ✅ **v0.37:** Real radiotap data, channel hopping fix, debug cleanup
+**Current Status (Feb 19, 2026 - v0.38):**
 - ✅ **v0.37.1:** Fix radiotap MCS flag + signal strength diagnostics
-  - Legacy CCK packets no longer falsely show "11n" in tcpdump
-  - Added diagnostic dump of first 10 packets' raw PHY status bytes
-  - Finding: phy[5]=0x20 → LNA_idx=1, VGA_idx=0 → -1 dBm
-  - Next: check chip cut_version for TSMC vs SMIC LNA table selection
+- ✅ **v0.38:** Fix signal strength + chip version detection
+  - Signal uses path AGC gain (byte 0) instead of stuck CCK AGC (byte 5)
+  - Chip version read from REG_SYS_CFG (cut version + TSMC/UMC vendor)
+  - Diagnostic shows both byte 0 (used) and byte 5 (stuck) for comparison
+  - Next: verify signal varies per packet, investigate missing OFDM/HT
 
 **Key Finding:** Conditional table parsing was the solution! AGC table had 266 PCI/SDIO-only entries!
 
@@ -43,7 +43,7 @@
 ### Monitor mode sniffer: ~40%
 What we have: basic packet capture with broken signal and only CCK rates.
 What's missing for a usable sniffer:
-- [ ] Correct signal strength (TSMC/SMIC table, new AGC mode check)
+- [x] Correct signal strength (byte 0 path AGC gain — v0.38)
 - [ ] OFDM and HT rate capture (currently only 1.0 Mb/s CCK)
 - [ ] Packet injection (TX in monitor mode)
 - [ ] Proper channel scanning/hopping tool
@@ -206,8 +206,8 @@ What's missing for a real WiFi driver:
   - phy[5]=0x20 → LNA_idx=1, VGA_idx=0 → -1 dBm (wrong table or AGC mode)
   - Old driver has TSMC table {29,20,12,3,-6,-15,-24,-33} vs our SMIC table
   - Old driver checks cut_version to pick table — we don't check cut_version
-- [ ] **Next: determine chip cut_version (TSMC vs SMIC) and fix LNA table**
-- [ ] **Next: investigate why only CCK packets seen (no OFDM/HT)**
+- [x] **DONE: chip version detection + signal fix using byte 0 AGC**
+- [ ] **Next: verify signal strength + investigate why only CCK packets seen**
 
 ### Phase 11: RF Calibration ✅ FUNCTIONAL (RX working!)
 - [x] Research IQK (I/Q Calibration) implementation
@@ -418,7 +418,8 @@ Running in "safe mode" with no PHY init - device stable but RX non-functional
 - ✅ v0.36: **Fix RF read address mask (bLSSIReadAddress) — monitor mode capture working!**
 - ✅ v0.37: **Real radiotap data + channel hopping fix + debug cleanup**
 - ✅ v0.37.1: **Fix radiotap MCS flag (11b not 11n) + signal strength diagnostics**
-- 🔧 Next: **Fix signal strength (TSMC/SMIC LNA table) + investigate missing OFDM/HT**
+- ✅ v0.38: **Fix signal strength (byte 0 AGC) + chip version detection**
+- 🔧 Next: **Verify signal + investigate missing OFDM/HT**
 - 🎯 v1.0: **Usable monitor mode sniffer with correct signal + multi-rate capture**
 
 ---

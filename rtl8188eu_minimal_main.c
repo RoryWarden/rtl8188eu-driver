@@ -23,7 +23,7 @@
 #include "rtl8188eu_phy.h"
 
 #define DRIVER_NAME "rtl8188eu_minimal"
-#define DRIVER_VERSION "0.37"
+#define DRIVER_VERSION "0.38"
 #define FIRMWARE_NAME "rtlwifi/rtl8188eufw.bin"
 
 /* Power Sequence Commands */
@@ -41,6 +41,7 @@ struct pwr_cmd {
 };
 
 /* RTL8188E Register Addresses - see README.md for documentation */
+#define REG_SYS_CFG				0x00F0	/* System Configuration */
 #define REG_SYS_FUNC_EN			0x0002	/* System Function Enable */
 #define FEN_ELDR				BIT(12)	/* EEPROM Loader clock enable */
 #define REG_APS_FSMCO			0x0004	/* APS FSM Control */
@@ -290,8 +291,6 @@ static const u8 rtl8188eu_hw_rate_to_radiotap[] = {
 	48, 72, 96, 108,			/* OFDM: 24/36/48/54 Mbps (0x08-0x0b) */
 };
 
-/* CCK LNA gain table for signal strength calculation */
-static const s8 cck_lna_gain[] = { 17, -1, -13, -29, -32, -35, -38, -41 };
 
 static inline u16 rtl8188eu_chan_to_freq(u8 channel)
 {
@@ -1805,29 +1804,25 @@ static void rtl8188eu_rx_complete(struct urb *urb)
 			if ((rxdw0 & RX_DW0_PHYST) && drvinfo_sz >= 8) {
 				u8 *phy_status = pbuf + RXDESC_SIZE;
 
-				if (is_cck) {
-					u8 cck_agc = phy_status[5];
-					u8 lna_idx = (cck_agc >> 5) & 0x7;
-					u8 vga_idx = cck_agc & 0x1f;
-
-					signal_dbm = cck_lna_gain[lna_idx] - (2 * vga_idx);
-				} else {
-					signal_dbm = ((phy_status[4] >> 1) & 0x7f) - 110;
-				}
+				signal_dbm = ((phy_status[0] & 0x3f) * 2) - 110;
 
 				if (signal_dbm < -100)
 					signal_dbm = -100;
 				if (signal_dbm > 0)
 					signal_dbm = 0;
 
-				if (rx_total_packets < 10)
-					pr_info("%s: RX diag #%u: hw_rate=0x%02x is_cck=%d drvinfo=%u "
-						"physt=%d phy[0-7]=%02x %02x %02x %02x %02x %02x %02x %02x "
+				if (rx_total_packets < 5)
+					pr_info("%s: RX diag #%u: rate=0x%02x %s drvinfo=%u "
+						"phy0=0x%02x(->%ddBm) phy5=0x%02x(lna%u/vga%u) "
 						"signal=%d\n",
-						DRIVER_NAME, rx_total_packets, hw_rate, is_cck,
-						drvinfo_sz, !!(rxdw0 & RX_DW0_PHYST),
-						phy_status[0], phy_status[1], phy_status[2], phy_status[3],
-						phy_status[4], phy_status[5], phy_status[6], phy_status[7],
+						DRIVER_NAME, rx_total_packets, hw_rate,
+						is_cck ? "CCK" : (is_ht ? "HT" : "OFDM"),
+						drvinfo_sz,
+						phy_status[0],
+						((phy_status[0] & 0x3f) * 2) - 110,
+						phy_status[5],
+						(phy_status[5] >> 5) & 0x7,
+						phy_status[5] & 0x1f,
 						signal_dbm);
 			}
 
@@ -2670,6 +2665,20 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 			rf_ctrl |= 0x07;
 			rtl8188eu_write_reg8(priv, REG_RF_CTRL, rf_ctrl);
 			msleep(1);
+		}
+	}
+
+	/* Read chip version from REG_SYS_CFG */
+	{
+		u32 sys_cfg;
+		ret = rtl8188eu_read_reg32(priv, REG_SYS_CFG, &sys_cfg);
+		if (ret == 0) {
+			u8 cut = (sys_cfg >> 12) & 0xf;
+			u8 vendor = (sys_cfg & BIT(19)) ? 1 : 0;
+
+			priv->hw_cfg.cut_version = cut;
+			pr_info("%s: Chip: RTL8188E, Cut %c, %s\n", DRIVER_NAME,
+				'A' + cut, vendor ? "UMC" : "TSMC");
 		}
 	}
 
