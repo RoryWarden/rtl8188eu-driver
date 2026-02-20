@@ -160,6 +160,22 @@ A from-scratch Linux kernel driver for the Realtek RTL8188EU USB WiFi adapter (T
 | rFPGA0_XA_LSSIReadBack | 0x08A0 | RF read data (SI mode) |
 | TransceiverA_HSPI_Readback | 0x08B8 | RF read data (PI mode) |
 
+### IQK Calibration & Compensation Registers
+| Register | Address | Purpose |
+|----------|---------|---------|
+| TX_POWER_BEFORE_IQK_A | 0x0E94 | TX IQK result X (bits [25:16] = 10-bit signed) |
+| TX_POWER_AFTER_IQK_A | 0x0E9C | TX IQK result Y (bits [25:16] = 10-bit signed) |
+| RX_POWER_BEFORE_IQK_A_2 | 0x0EA4 | RX IQK result X (bits [25:16] = 10-bit signed) |
+| RX_POWER_AFTER_IQK_A_2 | 0x0EAC | RX IQK result Y (bits [25:16] = 10-bit signed) |
+| OFDM_XA_TX_IQ_IMBALANCE | 0x0C80 | TX I/Q compensation (bits [9:0] = TX_A, [21:16] = TX_C low) |
+| OFDM_XC_TX_AFE | 0x0C94 | TX AFE correction (bits [31:28] = TX_C high) |
+| OFDM_ECCA_THRESHOLD | 0x0C4C | Extra compensation bits (BIT31 = TX_A overflow, BIT29 = TX_C overflow) |
+| OFDM_XA_RX_IQ_IMBALANCE | 0x0C14 | RX I/Q compensation (bits [9:0] = RX_X, [15:10] = RX_Y low) — CRITICAL for OFDM RX |
+| OFDM_RX_IQ_EXT_ANTA | 0x0CA0 | RX IQ extended (bits [31:28] = RX_Y high) |
+| rFPGA1_RFMOD | 0x0900 | RF mode 2 (bit 0 = 0 for 20MHz BW) |
+
+**IQK result application (from `_phy_path_a_fill_iqk_matrix`):** TX results are scaled by the current TX IQ base value (0xC80 bits [31:22]) before writing. RX results are written directly. Without applying IQK results to compensation registers, OFDM demodulation fails due to I/Q image interference — CCK uses DSSS which is robust to I/Q mismatch.
+
 ### RF Registers (0x00-0xFF via 3-wire serial)
 | Register | Address | Purpose |
 |----------|---------|---------|
@@ -312,6 +328,16 @@ ip -s link show <interface>
 
 | Version | Date | Change |
 |---------|------|--------|
+| v0.40.1 | Feb 19 | Fix IQK result application to compensation registers (OFDM RX) |
+| v0.40 | Feb 19 | DC offset cancellation attempt (removed — not supported on 8188E) |
+| v0.39.1 | Feb 19 | Fix crystal cap (CX_IN/CX_OUT match) |
+| v0.39 | Feb 19 | RF bandwidth (20MHz) + BWOPMODE init |
+| v0.38 | Feb 19 | Fix signal strength (byte 0 AGC) + chip version detection |
+| v0.37.1 | Feb 18 | Fix radiotap MCS flag + signal diagnostics |
+| v0.37 | Feb 18 | Real radiotap data + channel hopping + debug cleanup |
+| v0.36 | Feb 18 | Fix RF read address mask (bLSSIReadAddress) |
+| v0.35 | Feb 18 | Fix PF_PACKET delivery (skb_reset_mac_header) |
+| v0.34 | Feb 18 | Wireless extensions + radiotap headers for monitor mode |
 | v0.33 | Feb 17 | Fix RF readback timing 10us->100us — **CONTINUOUS RX!** |
 | v0.32 | Feb 16 | Fix calibration RF state (LC cal + IQK save/restore) |
 | v0.31 | Feb 16 | Fix RF environment setup + RF diagnostics |

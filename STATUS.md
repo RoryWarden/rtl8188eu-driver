@@ -1,6 +1,6 @@
 # RTL8188EU Driver Status - Feb 19, 2026
 
-## Version: 0.38 - Fix signal strength + chip version detection
+## Version: 0.40.1 - IQK result application to compensation registers
 
 ---
 
@@ -25,6 +25,7 @@
 
 ### Calibration (COMPLETE)
 - IQK calibration (TX+RX paths, save/restore 29 registers)
+- IQK results applied to compensation registers (0xC80/0xC94/0xC4C TX, 0xC14/0xCA0 RX)
 - LC calibration (packet TX mode — pauses queues, doesn't touch RF_AC)
 - Post-cal RF 0x00 reads correctly (0x33e60) — address mask bug fixed in v0.36
 
@@ -84,6 +85,8 @@ Channel hopping: RF read-modify-write on RF_CHNLBW
 
 | Version | Date | Change |
 |---------|------|--------|
+| v0.39.1| Feb 19 | Fix crystal cap (CX_IN/CX_OUT mismatch → OFDM broken) |
+| v0.39 | Feb 19 | RF bandwidth (20MHz) + BWOPMODE init |
 | v0.38 | Feb 19 | Fix signal strength (byte 0 AGC) + chip version detection |
 | v0.37 | Feb 18 | Real radiotap data + channel hopping fix + debug cleanup |
 | v0.36 | Feb 18 | Fix RF read address mask (bLSSIReadAddress) — **MONITOR MODE WORKING!** |
@@ -116,9 +119,8 @@ Channel hopping: RF read-modify-write on RF_CHNLBW
 
 ## Next Steps
 
-1. Verify signal strength varies per packet (-40 to -70 dBm for nearby APs)
-2. Investigate why only CCK 1.0 Mb/s packets captured (no OFDM/HT)
-3. Consider managed mode / association support
+1. Test OFDM reception (crystal cap fix should enable it)
+2. Consider managed mode / association support
 
 ---
 
@@ -134,5 +136,5 @@ Channel hopping: RF read-modify-write on RF_CHNLBW
 ---
 
 **Last Updated**: Feb 19, 2026
-**Version**: 0.38
-**Status**: Fixed signal strength, chip version detection, clean dmesg output
+**Version**: 0.39.1
+**Status**: Crystal cap fix for OFDM reception

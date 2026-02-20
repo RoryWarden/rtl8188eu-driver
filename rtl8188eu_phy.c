@@ -945,11 +945,13 @@ static void iqk_config_mac(struct rtl8188eu_priv *priv)
 /**
  * rtl8188eu_iqk_tx - TX I/Q Calibration (inner)
  * @priv: Driver private structure
+ * @tx_x: Output pointer for TX X result (bits [25:16] of 0xE94)
+ * @tx_y: Output pointer for TX Y result (bits [25:16] of 0xE9C)
  *
  * Runs TX IQK tone. Called after ADDA/MAC/BB are configured.
  * Returns 0 on success, -1 on failure.
  */
-static int rtl8188eu_iqk_tx(struct rtl8188eu_priv *priv)
+static int rtl8188eu_iqk_tx(struct rtl8188eu_priv *priv, u32 *tx_x, u32 *tx_y)
 {
 	u32 reg_eac, reg_e94, reg_e9c;
 
@@ -985,6 +987,8 @@ static int rtl8188eu_iqk_tx(struct rtl8188eu_priv *priv)
 	if (!(reg_eac & BIT(28)) &&
 	    (((reg_e94 & 0x03FF0000) >> 16) != 0x142) &&
 	    (((reg_e9c & 0x03FF0000) >> 16) != 0x42)) {
+		*tx_x = (reg_e94 >> 16) & 0x3FF;
+		*tx_y = (reg_e9c >> 16) & 0x3FF;
 		pr_debug("IQK TX OK\n");
 		return 0;
 	}
@@ -996,11 +1000,13 @@ static int rtl8188eu_iqk_tx(struct rtl8188eu_priv *priv)
 /**
  * rtl8188eu_iqk_rx - RX I/Q Calibration (inner)
  * @priv: Driver private structure
+ * @rx_x: Output pointer for RX X result (bits [25:16] of 0xEA4)
+ * @rx_y: Output pointer for RX Y result (bits [25:16] of 0xEAC)
  *
  * Runs RX IQK. Called after TX IQK succeeds.
  * Returns 0 on success, -1 on failure.
  */
-static int rtl8188eu_iqk_rx(struct rtl8188eu_priv *priv)
+static int rtl8188eu_iqk_rx(struct rtl8188eu_priv *priv, u32 *rx_x, u32 *rx_y)
 {
 	u32 reg_eac, reg_ea4, reg_e94, reg_e9c;
 	u32 u4tmp;
@@ -1068,12 +1074,57 @@ static int rtl8188eu_iqk_rx(struct rtl8188eu_priv *priv)
 	if (!(reg_eac & BIT(27)) &&
 	    (((reg_ea4 & 0x03FF0000) >> 16) != 0x132) &&
 	    (((reg_eac & 0x03FF0000) >> 16) != 0x36)) {
+		*rx_x = (reg_ea4 >> 16) & 0x3FF;
+		*rx_y = (reg_eac >> 16) & 0x3FF;
 		pr_debug("IQK RX OK\n");
 		return 0;
 	}
 
 	pr_debug("IQK RX failed\n");
 	return -1;
+}
+
+/**
+ * iqk_apply_results - Write IQK calibration results to compensation registers
+ * @priv: Driver private structure
+ * @tx_ok: Whether TX IQK passed
+ * @tx_x: TX IQK X result (10-bit)
+ * @tx_y: TX IQK Y result (10-bit)
+ * @rx_ok: Whether RX IQK passed
+ * @rx_x: RX IQK X result (10-bit)
+ * @rx_y: RX IQK Y result (10-bit)
+ *
+ * Applies measured I/Q imbalance compensation values to hardware registers.
+ * From old driver: _phy_path_a_fill_iqk_matrix() in halrf_8188e_ce.c
+ */
+static void iqk_apply_results(struct rtl8188eu_priv *priv,
+			       bool tx_ok, u32 tx_x, u32 tx_y,
+			       bool rx_ok, u32 rx_x, u32 rx_y)
+{
+	if (tx_ok) {
+		s32 X, Y;
+		u32 oldval, TX_A;
+		s32 TX_C;
+
+		oldval = (rtl8188eu_read_bb_reg(priv, 0xC80, bMaskDWord) >> 22) & 0x3FF;
+
+		X = (tx_x & 0x200) ? (s32)(tx_x | 0xFFFFFC00) : (s32)tx_x;
+		TX_A = (X * oldval) >> 8;
+		rtl8188eu_write_bb_reg(priv, 0xC80, 0x3FF, TX_A & 0x3FF);
+		rtl8188eu_write_bb_reg(priv, 0xC4C, BIT(31), ((X * oldval >> 7) & 0x1));
+
+		Y = (tx_y & 0x200) ? (s32)(tx_y | 0xFFFFFC00) : (s32)tx_y;
+		TX_C = (Y * oldval) >> 8;
+		rtl8188eu_write_bb_reg(priv, 0xC94, 0xF0000000, ((TX_C & 0x3C0) >> 6));
+		rtl8188eu_write_bb_reg(priv, 0xC80, 0x003F0000, (TX_C & 0x3F));
+		rtl8188eu_write_bb_reg(priv, 0xC4C, BIT(29), ((Y * oldval >> 7) & 0x1));
+	}
+
+	if (rx_ok) {
+		rtl8188eu_write_bb_reg(priv, 0xC14, 0x3FF, rx_x);
+		rtl8188eu_write_bb_reg(priv, 0xC14, 0xFC00, rx_y & 0x3F);
+		rtl8188eu_write_bb_reg(priv, 0xCA0, 0xF0000000, (rx_y >> 6) & 0xF);
+	}
 }
 
 /**
@@ -1093,6 +1144,8 @@ int rtl8188eu_iqk_calibrate(struct rtl8188eu_priv *priv)
 	u32 pi_mode_save;
 	int tx_result, rx_result;
 	int retry;
+	bool tx_ok = false, rx_ok = false;
+	u32 tx_x = 0, tx_y = 0, rx_x = 0, rx_y = 0;
 
 	pr_debug("Starting IQK calibration\n");
 
@@ -1119,10 +1172,12 @@ int rtl8188eu_iqk_calibrate(struct rtl8188eu_priv *priv)
 	for (retry = 0; retry < 3; retry++) {
 		pr_debug("IQK attempt %d/3\n", retry + 1);
 
-		tx_result = rtl8188eu_iqk_tx(priv);
+		tx_result = rtl8188eu_iqk_tx(priv, &tx_x, &tx_y);
 		if (tx_result == 0) {
-			rx_result = rtl8188eu_iqk_rx(priv);
+			tx_ok = true;
+			rx_result = rtl8188eu_iqk_rx(priv, &rx_x, &rx_y);
 			if (rx_result == 0) {
+				rx_ok = true;
 				pr_info("IQK calibration COMPLETE (TX+RX OK)\n");
 				break;
 			}
@@ -1149,6 +1204,13 @@ int rtl8188eu_iqk_calibrate(struct rtl8188eu_priv *priv)
 	rtl8188eu_write_reg32_direct(priv, 0x840, 0x00032ed3);
 	rtl8188eu_write_reg32_direct(priv, 0xe30, 0x01008c00);
 	rtl8188eu_write_reg32_direct(priv, 0xe34, 0x01008c00);
+
+	if (tx_ok || rx_ok) {
+		iqk_apply_results(priv, tx_ok, tx_x, tx_y, rx_ok, rx_x, rx_y);
+		pr_info("IQK results applied: TX(%s) x=0x%03x y=0x%03x, RX(%s) x=0x%03x y=0x%03x\n",
+			tx_ok ? "OK" : "FAIL", tx_x, tx_y,
+			rx_ok ? "OK" : "FAIL", rx_x, rx_y);
+	}
 
 	if (retry >= 3) {
 		pr_err("IQK calibration FAILED after 3 attempts!\n");

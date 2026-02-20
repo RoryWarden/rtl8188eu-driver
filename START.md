@@ -1,8 +1,8 @@
 # RTL8188EU Driver - Quick Start & Progress
 
 **Last Updated:** Feb 19, 2026
-**Current Version:** v0.38 (Fix signal strength + chip version detection)
-**Previous Version:** v0.37.1 (Fix radiotap MCS flag + signal strength diagnostics)
+**Current Version:** v0.40.1 (IQK result application to compensation registers)
+**Previous Version:** v0.40 (DC cancellation removed — not supported on 8188E)
 
 ---
 
@@ -19,20 +19,23 @@
 - ✅ Channel hopping works
 
 **What doesn't work yet:**
-- ⏳ Signal strength fixed (byte 0 AGC gain) — needs testing
+- ✅ Signal strength working (-62 to -64 dBm, varies per packet)
 - ❌ Only seeing CCK 1.0 Mb/s packets (no OFDM/HT captured yet)
 - ❌ No managed mode, no AP association, no scanning
 - ❌ No mac80211/cfg80211 integration
 - ❌ No WPA/security
 - ❌ No packet injection
 
-**Current Status (Feb 19, 2026 - v0.38):**
-- ✅ **v0.37.1:** Fix radiotap MCS flag + signal strength diagnostics
+**Current Status (Feb 19, 2026 - v0.40.1):**
 - ✅ **v0.38:** Fix signal strength + chip version detection
-  - Signal uses path AGC gain (byte 0) instead of stuck CCK AGC (byte 5)
-  - Chip version read from REG_SYS_CFG (cut version + TSMC/UMC vendor)
-  - Diagnostic shows both byte 0 (used) and byte 5 (stuck) for comparison
-  - Next: verify signal varies per packet, investigate missing OFDM/HT
+- ✅ **v0.39:** RF bandwidth (20MHz) + BWOPMODE init
+- ✅ **v0.39.1:** Fix crystal cap (CX_IN/CX_OUT matched to 32)
+- ✅ **v0.40:** DC offset cancellation removed (not supported on RTL8188E)
+- ✅ **v0.40.1:** IQK result application to I/Q compensation registers
+  - TX: 0xC80 (TX_IQ imbalance), 0xC94 bits[31:28] (TX AFE), 0xC4C bits[31,29]
+  - RX: 0xC14 bits[9:0]+[15:10] (RX_IQ imbalance), 0xCA0 bits[31:28] (RX IQ ext)
+  - Results: TX x=0x100 y=0x000, RX x=0x100 y=0x000 (identity — no correction applied)
+  - IQK passes but measures zero imbalance — still only CCK 1.0 Mb/s, no OFDM
 
 **Key Finding:** Conditional table parsing was the solution! AGC table had 266 PCI/SDIO-only entries!
 
@@ -419,7 +422,10 @@ Running in "safe mode" with no PHY init - device stable but RX non-functional
 - ✅ v0.37: **Real radiotap data + channel hopping fix + debug cleanup**
 - ✅ v0.37.1: **Fix radiotap MCS flag (11b not 11n) + signal strength diagnostics**
 - ✅ v0.38: **Fix signal strength (byte 0 AGC) + chip version detection**
-- 🔧 Next: **Verify signal + investigate missing OFDM/HT**
+- ✅ v0.39: **RF bandwidth (20MHz) + BWOPMODE init**
+- ✅ v0.39.1: **Fix crystal cap for OFDM reception (CX_IN/CX_OUT mismatch)**
+- ✅ v0.40: **DC cancellation removed (not supported on 8188E)**
+- ✅ v0.40.1: **IQK result application — identity values, still CCK only**
 - 🎯 v1.0: **Usable monitor mode sniffer with correct signal + multi-rate capture**
 
 ---
@@ -549,7 +555,7 @@ Despite being in an apartment complex with heavy WiFi traffic, we only receive 1
 - [x] **RX packets received** ✅ **Continuous! 12,000+ callbacks, 3,700+ packets**
 - [x] Radiotap headers with correct rate field ✅
 - [x] Channel hopping works ✅
-- [ ] Signal strength broken (-1 dBm always)
+- [x] Signal strength working (-62 to -64 dBm) ✅ **FIXED v0.38!**
 - [ ] Only CCK 1.0 Mb/s packets captured (no OFDM/HT)
 
 **Original goals (monitor mode sniffer):**
@@ -557,7 +563,7 @@ Despite being in an apartment complex with heavy WiFi traffic, we only receive 1
 - [x] Continuous RX (more than 1 packet) ✅ **ACHIEVED v0.33!**
 - [x] Monitor mode packet capture shows WiFi networks ✅ **ACHIEVED v0.36!**
 - [x] Can capture packets in monitor mode ✅ **ACHIEVED v0.36!**
-- [ ] Correct signal strength reporting
+- [x] Correct signal strength reporting ✅ **ACHIEVED v0.38!**
 - [ ] Multi-rate capture (OFDM + HT, not just CCK)
 - [ ] Usable with Wireshark/tcpdump for real analysis
 

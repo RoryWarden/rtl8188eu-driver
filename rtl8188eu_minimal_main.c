@@ -23,7 +23,7 @@
 #include "rtl8188eu_phy.h"
 
 #define DRIVER_NAME "rtl8188eu_minimal"
-#define DRIVER_VERSION "0.38"
+#define DRIVER_VERSION "0.40.1"
 #define FIRMWARE_NAME "rtlwifi/rtl8188eufw.bin"
 
 /* Power Sequence Commands */
@@ -2687,6 +2687,22 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 	if (ret)
 		pr_err("%s: BB config failed: %d\n", DRIVER_NAME, ret);
 
+	/* Set crystal cap — both CX_IN and CX_OUT must match for OFDM.
+	 * Without this, frequency offset is ~100+ ppm, preventing OFDM reception.
+	 * Old driver reads from EFUSE; we use the default (0x20 = 32).
+	 */
+#define EEPROM_DEFAULT_CRYSTAL_CAP	0x20
+	{
+		u32 xtal;
+		ret = rtl8188eu_read_reg32(priv, REG_AFE_XTAL_CTRL, &xtal);
+		if (ret == 0) {
+			u32 cap_val = EEPROM_DEFAULT_CRYSTAL_CAP |
+				      (EEPROM_DEFAULT_CRYSTAL_CAP << 6);
+			xtal = (xtal & ~0x007FF800) | (cap_val << 11);
+			rtl8188eu_write_reg32(priv, REG_AFE_XTAL_CTRL, xtal);
+		}
+	}
+
 	msleep(10);
 
 	ret = rtl8188eu_phy_rf_config(priv);
@@ -2704,6 +2720,11 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 
 		/* Cache RF_CHNLBW for channel switching */
 		priv->rf_chnl_val = rf18;
+
+		/* Set RF bandwidth to 20MHz: bits [11:10] = 11 */
+		priv->rf_chnl_val = (priv->rf_chnl_val & 0xfffff3ff) | BIT(10) | BIT(11);
+		rtl8188eu_write_rf_reg(priv, RF_PATH_A, RF_CHNLBW,
+				       bRFRegOffsetMask, priv->rf_chnl_val);
 	}
 
 	rtl8188eu_lc_calibrate(priv);
@@ -2716,6 +2737,28 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 		if (ret == 0) {
 			rfmod |= bCCKEn | bOFDMEn;
 			rtl8188eu_write_reg32(priv, rFPGA0_RFMOD, rfmod);
+		}
+	}
+
+	/* Set rFPGA1_RFMOD (0x900) bit 0 = 0 for 20MHz — matches old driver's PHY_SetBWMode */
+	{
+		u32 rfmod1;
+		ret = rtl8188eu_read_reg32(priv, 0x900, &rfmod1);
+		if (ret == 0) {
+			rfmod1 &= ~BIT(0);
+			rtl8188eu_write_reg32(priv, 0x900, rfmod1);
+		}
+	}
+
+	/* Set bandwidth operating mode to 20MHz */
+#define REG_BWOPMODE	0x0603
+#define BW_OPMODE_20MHZ	BIT(2)
+	{
+		u8 bw_opmode;
+		ret = rtl8188eu_read_reg8(priv, REG_BWOPMODE, &bw_opmode);
+		if (ret == 0) {
+			bw_opmode |= BW_OPMODE_20MHZ;
+			rtl8188eu_write_reg8(priv, REG_BWOPMODE, bw_opmode);
 		}
 	}
 
@@ -2771,6 +2814,44 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 	rtl8188eu_write_reg32(priv, 0xE10, 0x26262626);
 
 	msleep(50);
+
+	/* Diagnostic: verify OFDM-enabling registers */
+	{
+		u32 reg800;
+		ret = rtl8188eu_read_reg32(priv, 0x800, &reg800);
+		if (ret == 0)
+			pr_info("%s: BB 0x800=0x%08x (CCKEn=%d OFDMEn=%d RFMOD=%d)\n",
+				DRIVER_NAME, reg800,
+				!!(reg800 & 0x1000000), !!(reg800 & 0x2000000),
+				!!(reg800 & 0x1));
+		pr_info("%s: RF_CHNLBW=0x%05x (BW bits[11:10]=%u)\n",
+			DRIVER_NAME, priv->rf_chnl_val,
+			(priv->rf_chnl_val >> 10) & 0x3);
+	}
+	{
+		u32 xtal_val;
+		ret = rtl8188eu_read_reg32(priv, REG_AFE_XTAL_CTRL, &xtal_val);
+		if (ret == 0)
+			pr_info("%s: XtalCtrl=0x%08x (cap_out=%u cap_in=%u)\n",
+				DRIVER_NAME, xtal_val,
+				(xtal_val >> 17) & 0x3f,
+				(xtal_val >> 11) & 0x3f);
+	}
+	/* IQK compensation diagnostic dump */
+	{
+		u32 r900, rc50, rc80, rc14, rca0;
+
+		rtl8188eu_read_reg32(priv, 0x900, &r900);
+		rtl8188eu_read_reg32(priv, 0xC50, &rc50);
+		rtl8188eu_read_reg32(priv, 0xC80, &rc80);
+		rtl8188eu_read_reg32(priv, 0xC14, &rc14);
+		rtl8188eu_read_reg32(priv, 0xCA0, &rca0);
+
+		pr_info("%s: OFDM diag: 0x900=0x%08x(BW20=%d) 0xC50=0x%08x(IGI=0x%02x)\n",
+			DRIVER_NAME, r900, !(r900 & 1), rc50, rc50 & 0x7f);
+		pr_info("%s: IQK comp: 0xC80=0x%08x(TX_IQ) 0xC14=0x%08x(RX_IQ) 0xCA0=0x%08x\n",
+			DRIVER_NAME, rc80, rc14, rca0);
+	}
 
 	pr_info("%s: Init complete\n", DRIVER_NAME);
 
