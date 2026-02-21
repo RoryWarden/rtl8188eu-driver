@@ -1,6 +1,6 @@
-# RTL8188EU Driver Status - Feb 19, 2026
+# RTL8188EU Driver Status - Feb 20, 2026
 
-## Version: 0.40.1 - IQK result application to compensation registers
+## Version: 1.0.0 - mac80211 conversion (managed + monitor mode)
 
 ---
 
@@ -60,23 +60,34 @@
 
 ---
 
+### mac80211 Integration (COMPLETE - v1.0.0)
+- ieee80211_alloc_hw / ieee80211_register_hw
+- ieee80211_ops: tx, start, stop, add/remove_interface, config, configure_filter
+- bss_info_changed: BSSID, association, beacon interval, bandwidth
+- sw_scan_start/complete for software scanning
+- set_key returns -EOPNOTSUPP (software crypto via mac80211)
+- Channel context emulation (ieee80211_emulate_*_chanctx)
+- minstrel_ht rate control algorithm
+- HT20/HT40 bandwidth switching (MAC + BB + RF)
+
 ## What Doesn't Work Yet
 
 ### Not Yet Tested
-- Extended continuous operation
-- Association / managed mode
+- AP association via wpa_supplicant
+- WPA2 authentication (software crypto should work)
+- OFDM/HT rate reception (still only CCK 1.0 Mb/s)
 
 ---
 
 ## Current Interface State
 
 ```
-Interface: enx* (changes each boot - random MAC)
-State: UP, carrier ON
-Monitor Mode: ENABLED (RCR = 0xf000392f)
-Link type: IEEE802_11_RADIO (radiotap)
-Radiotap: real rate (CCK/OFDM/HT MCS), real signal (PHY status parsed)
-Channel hopping: RF read-modify-write on RF_CHNLBW
+Interface: wlx* (changes each boot - random MAC)
+Modes: managed + monitor (via iw)
+mac80211: phy2, minstrel_ht rate control
+Monitor: tcpdump capture with radiotap headers
+Managed: iw scan finds APs with full BSS details
+HT caps: HT20/HT40, SGI, MCS 0-7
 ```
 
 ---
@@ -85,6 +96,7 @@ Channel hopping: RF read-modify-write on RF_CHNLBW
 
 | Version | Date | Change |
 |---------|------|--------|
+| v1.0.0 | Feb 20 | **mac80211 conversion — managed + monitor mode + scanning** |
 | v0.39.1| Feb 19 | Fix crystal cap (CX_IN/CX_OUT mismatch → OFDM broken) |
 | v0.39 | Feb 19 | RF bandwidth (20MHz) + BWOPMODE init |
 | v0.38 | Feb 19 | Fix signal strength (byte 0 AGC) + chip version detection |
@@ -119,14 +131,15 @@ Channel hopping: RF read-modify-write on RF_CHNLBW
 
 ## Next Steps
 
-1. Test OFDM reception (crystal cap fix should enable it)
-2. Consider managed mode / association support
+1. Test AP association via wpa_supplicant (WPA2-PSK)
+2. Debug OFDM/HT rate capture (still only CCK 1.0 Mb/s)
+3. Test packet injection in monitor mode
 
 ---
 
 ## Key Files
 
-- `rtl8188eu_minimal_main.c` - Main driver (~3100 lines)
+- `rtl8188eu_minimal_main.c` - Main driver (~2400 lines, mac80211)
 - `rtl8188eu.h` - Common structures and definitions
 - `rtl8188eu_phy.h` - PHY function declarations
 - `rtl8188eu_phy.c` - PHY register access + calibration (~1200 lines)
@@ -135,6 +148,6 @@ Channel hopping: RF read-modify-write on RF_CHNLBW
 
 ---
 
-**Last Updated**: Feb 19, 2026
-**Version**: 0.39.1
-**Status**: Crystal cap fix for OFDM reception
+**Last Updated**: Feb 20, 2026
+**Version**: 1.0.0
+**Status**: mac80211 conversion — managed + monitor mode working

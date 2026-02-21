@@ -4,6 +4,7 @@
 #include <linux/usb.h>
 #include <linux/netdevice.h>
 #include <linux/mutex.h>
+#include <net/mac80211.h>
 #include "rtl8188eu_phy.h"
 
 /* RX URB management */
@@ -24,6 +25,12 @@ struct hw_config {
 	u8 package_type;	/* Package type */
 };
 
+/* MSR (Media Status Register) network type values */
+#define MSR_NOLINK		0x00
+#define MSR_ADHOC		0x01
+#define MSR_INFRA		0x02
+#define MSR_AP			0x03
+
 /* Main driver private structure */
 struct rtl8188eu_priv {
 	struct usb_device *udev;
@@ -31,33 +38,42 @@ struct rtl8188eu_priv {
 	const struct firmware *fw;
 	bool chip_powered_on;
 	u8 out_ep_queue_sel;		/* USB endpoint queue selection */
-	u8 out_ep_number;			/* Number of OUT endpoints */
+	u8 out_ep_number;		/* Number of OUT endpoints */
 
-	/* Phase 2: Network interface */
-	struct net_device *netdev;	/* Network device */
-	u8 rx_endpoint;				/* USB IN endpoint for RX */
-	u8 tx_endpoint;				/* USB OUT endpoint for TX */
+	/* mac80211 interface */
+	struct ieee80211_hw *hw;	/* mac80211 hardware struct */
+	struct ieee80211_vif *vif;	/* Current virtual interface */
+
+	/* USB endpoints */
+	u8 rx_endpoint;			/* USB IN endpoint for RX */
+	u8 tx_endpoint;			/* USB OUT endpoint for TX */
 	u8 mac_addr[ETH_ALEN];		/* MAC address */
 
-	/* Phase 2, Step 5: RX URBs */
+	/* RX URBs */
 	struct rtl8188eu_rx_urb rx_urbs[RX_URB_COUNT];
 
-	/* Phase 1: PHY layer */
-	struct bb_register_definition phy_reg_def[2];  /* Path A and B (only A used) */
-	struct mutex rf_read_mutex;  /* Protect RF read operations */
+	/* PHY layer */
+	struct bb_register_definition phy_reg_def[2];
+	struct mutex rf_read_mutex;
 
 	/* Hardware configuration for PHY table parsing */
 	struct hw_config hw_cfg;
 
 	/* H2C command interface tracking */
-	u8 last_hmebox_num;  /* Last H2C mailbox number used (0-3) */
+	u8 last_hmebox_num;
 
 	/* Radio state */
-	u8 channel;  /* Current WiFi channel (1-14) */
-	u32 rf_chnl_val;  /* Cached RF_CHNLBW register value */
+	u8 channel;			/* Current WiFi channel (1-14) */
+	u32 rf_chnl_val;		/* Cached RF_CHNLBW register value */
+
+	/* Bandwidth state */
+	enum nl80211_chan_width current_bw;
+	u8 sec_ch_offset;		/* Secondary channel offset for HT40 */
 
 	/* Device state */
-	bool disconnecting;  /* Set during rmmod/disconnect to stop TX/RX */
+	bool started;			/* HW started via mac80211 start() */
+	bool disconnecting;		/* Set during rmmod/disconnect */
+	unsigned int rx_filter;		/* Current FIF_* filter flags */
 };
 
 #endif /* RTL8188EU_H */

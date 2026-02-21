@@ -2,6 +2,7 @@
 #define RTL8188EU_PHY_H
 
 #include <linux/types.h>
+#include <net/cfg80211.h>
 
 /* Forward declaration */
 struct rtl8188eu_priv;
@@ -14,13 +15,13 @@ enum rf_path {
 
 /* BB register definition for RF access */
 struct bb_register_definition {
-	u32 rfintfs;           /* RF interface software control */
-	u32 rfintfo;           /* RF interface output enable */
-	u32 rfintfe;           /* RF interface enable */
-	u32 rf3wireOffset;     /* LSSI data (RF write) - KEY REGISTER */
-	u32 rfHSSIPara2;       /* HSSI parameter 2 */
-	u32 rfLSSIReadBack;    /* LSSI readback (SI mode) */
-	u32 rfLSSIReadBackPi;  /* LSSI readback (PI mode) */
+	u32 rfintfs;
+	u32 rfintfo;
+	u32 rfintfe;
+	u32 rf3wireOffset;
+	u32 rfHSSIPara2;
+	u32 rfLSSIReadBack;
+	u32 rfLSSIReadBackPi;
 };
 
 /* Bitmasks */
@@ -36,10 +37,15 @@ struct bb_register_definition {
 #define rFPGA0_XA_LSSIReadBack      0x8a0
 #define TransceiverA_HSPI_Readback  0x8b8
 
+/* HT40 BB registers */
+#define rFPGA1_RFMOD                0x900
+#define rCCK0_System                0xA00
+#define rOFDM1_LSTF                 0xD00
+
 /* Bit definitions for RF readback */
-#define bLSSIReadAddress    0x7f800000  /* Bits [30:23] */
-#define bLSSIReadEdge       0x80000000  /* Bit [31] */
-#define bLSSIReadBackData   0xfffff     /* Bits [19:0] */
+#define bLSSIReadAddress    0x7f800000
+#define bLSSIReadEdge       0x80000000
+#define bLSSIReadBackData   0xfffff
 
 /* RF register addresses */
 #define RF_AC           0x00
@@ -74,6 +80,10 @@ int rtl8188eu_load_mac_reg_table(struct rtl8188eu_priv *priv);
 /* Main PHY initialization functions */
 int rtl8188eu_phy_bb_config(struct rtl8188eu_priv *priv);
 int rtl8188eu_phy_rf_config(struct rtl8188eu_priv *priv);
+
+/* Bandwidth setting (HT20/HT40) */
+void rtl8188eu_set_bw(struct rtl8188eu_priv *priv,
+		       const struct cfg80211_chan_def *chandef);
 
 /* PHY test functions */
 int rtl8188eu_phy_test_read_only(struct rtl8188eu_priv *priv);

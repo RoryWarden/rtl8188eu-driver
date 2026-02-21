@@ -9,6 +9,7 @@
 #include <linux/module.h>
 #include <linux/usb.h>
 #include <linux/delay.h>
+#include <net/cfg80211.h>
 #include "rtl8188eu.h"
 #include "rtl8188eu_phy.h"
 
@@ -1220,6 +1221,116 @@ int rtl8188eu_iqk_calibrate(struct rtl8188eu_priv *priv)
 	return 0;
 }
 EXPORT_SYMBOL(rtl8188eu_iqk_calibrate);
+
+/* Register defines for bandwidth setting */
+#define REG_BWOPMODE		0x0603
+#define BW_OPMODE_20MHZ		BIT(2)
+
+/**
+ * rtl8188eu_set_bw - Set channel bandwidth (20 or 40 MHz)
+ * @priv: Driver private structure
+ * @chandef: Channel definition from mac80211
+ *
+ * Configures MAC, BB, and RF registers for the requested bandwidth.
+ * Matches old driver's PHY_SetBWMode8188E() implementation.
+ */
+void rtl8188eu_set_bw(struct rtl8188eu_priv *priv,
+		       const struct cfg80211_chan_def *chandef)
+{
+	enum nl80211_chan_width width = chandef->width;
+	u32 bw_reg, bw_opmode;
+	u32 rfmod0, rfmod1, cck0, ofdm1_lstf, reg818;
+
+	/* Read REG_BWOPMODE (8-bit at 0x0603) via 32-bit aligned read */
+	bw_reg = rtl8188eu_read_reg32_direct(priv, REG_BWOPMODE & ~3);
+	bw_opmode = (bw_reg >> ((REG_BWOPMODE & 3) * 8)) & 0xFF;
+	rfmod0 = rtl8188eu_read_bb_reg(priv, 0x800, bMaskDWord);
+	rfmod1 = rtl8188eu_read_bb_reg(priv, rFPGA1_RFMOD, bMaskDWord);
+
+	if (width == NL80211_CHAN_WIDTH_40) {
+		int primary_freq = chandef->chan->center_freq;
+		int center_freq = chandef->center_freq1;
+		bool upper = (primary_freq > center_freq);
+
+		pr_info("Setting 40 MHz bandwidth (primary=%d center=%d %s)\n",
+			primary_freq, center_freq,
+			upper ? "upper" : "lower");
+
+		/* MAC: clear 20MHz-only bit */
+		bw_opmode &= ~BW_OPMODE_20MHZ;
+		rtl8188eu_write_reg8(priv, REG_BWOPMODE, bw_opmode);
+
+		/* MAC: set secondary channel in RRSR+2 */
+		if (upper)
+			rtl8188eu_write_reg8(priv, 0x0442, 0x01);
+		else
+			rtl8188eu_write_reg8(priv, 0x0442, 0x02);
+
+		/* BB: FPGA0_RFMOD bit 0 = 1 (40MHz) */
+		rfmod0 |= BIT(0);
+		rtl8188eu_write_bb_reg(priv, 0x800, bMaskDWord, rfmod0);
+
+		/* BB: FPGA1_RFMOD bit 0 = 1 (40MHz) */
+		rfmod1 |= BIT(0);
+		rtl8188eu_write_bb_reg(priv, rFPGA1_RFMOD, bMaskDWord, rfmod1);
+
+		/* BB: CCK0_System sideband select (bit 4) */
+		cck0 = rtl8188eu_read_bb_reg(priv, rCCK0_System, bMaskDWord);
+		if (upper)
+			cck0 |= BIT(4);
+		else
+			cck0 &= ~BIT(4);
+		rtl8188eu_write_bb_reg(priv, rCCK0_System, bMaskDWord, cck0);
+
+		/* BB: OFDM1_LSTF primary offset bits [11:10] */
+		ofdm1_lstf = rtl8188eu_read_bb_reg(priv, rOFDM1_LSTF, bMaskDWord);
+		ofdm1_lstf &= ~(BIT(10) | BIT(11));
+		if (upper)
+			ofdm1_lstf |= BIT(11);
+		else
+			ofdm1_lstf |= BIT(10);
+		rtl8188eu_write_bb_reg(priv, rOFDM1_LSTF, bMaskDWord, ofdm1_lstf);
+
+		/* BB: 0x818 secondary channel position bits [27:26] */
+		reg818 = rtl8188eu_read_bb_reg(priv, 0x818, bMaskDWord);
+		reg818 &= ~(BIT(26) | BIT(27));
+		if (upper)
+			reg818 |= BIT(27);
+		else
+			reg818 |= BIT(26);
+		rtl8188eu_write_bb_reg(priv, 0x818, bMaskDWord, reg818);
+
+		/* RF: RF_CHNLBW bits [11:10] = 01 (40MHz) */
+		priv->rf_chnl_val = (priv->rf_chnl_val & 0xfffff3ff) | BIT(10);
+		rtl8188eu_write_rf_reg(priv, RF_PATH_A, RF_CHNLBW,
+				       bRFRegOffsetMask, priv->rf_chnl_val);
+
+		priv->current_bw = NL80211_CHAN_WIDTH_40;
+	} else {
+		/* 20 MHz */
+		pr_debug("Setting 20 MHz bandwidth\n");
+
+		/* MAC: set 20MHz-only bit */
+		bw_opmode |= BW_OPMODE_20MHZ;
+		rtl8188eu_write_reg8(priv, REG_BWOPMODE, bw_opmode);
+
+		/* BB: FPGA0_RFMOD bit 0 = 0 (20MHz) */
+		rfmod0 &= ~BIT(0);
+		rtl8188eu_write_bb_reg(priv, 0x800, bMaskDWord, rfmod0);
+
+		/* BB: FPGA1_RFMOD bit 0 = 0 (20MHz) */
+		rfmod1 &= ~BIT(0);
+		rtl8188eu_write_bb_reg(priv, rFPGA1_RFMOD, bMaskDWord, rfmod1);
+
+		/* RF: RF_CHNLBW bits [11:10] = 11 (20MHz) */
+		priv->rf_chnl_val = (priv->rf_chnl_val & 0xfffff3ff) | BIT(10) | BIT(11);
+		rtl8188eu_write_rf_reg(priv, RF_PATH_A, RF_CHNLBW,
+				       bRFRegOffsetMask, priv->rf_chnl_val);
+
+		priv->current_bw = NL80211_CHAN_WIDTH_20;
+	}
+}
+EXPORT_SYMBOL(rtl8188eu_set_bw);
 
 MODULE_DESCRIPTION("RTL8188EU PHY Layer");
 MODULE_LICENSE("GPL");
