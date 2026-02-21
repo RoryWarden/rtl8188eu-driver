@@ -1,6 +1,6 @@
 # RTL8188EU Driver - Quick Start & Progress
 
-**Last Updated:** Feb 20, 2026
+**Last Updated:** Feb 21, 2026
 **Current Version:** v1.0.0 (mac80211 conversion — managed + monitor mode)
 **Previous Version:** v0.40.1 (IQK result application to compensation registers)
 
@@ -24,10 +24,17 @@
 - ✅ Software crypto (set_key returns -EOPNOTSUPP)
 
 **What doesn't work yet:**
+- ❌ `iw scan` returns 0 results despite frames reaching mac80211 (see Phase 25)
 - ❌ Only seeing CCK 1.0 Mb/s packets (no OFDM/HT captured yet)
-- ❌ No AP association tested yet (scan works, connect not yet tested)
+- ❌ No AP association tested yet
 - ❌ No WPA supplicant tested
 - ❌ No packet injection
+
+**Current investigation (Feb 21, 2026):**
+- Scan diagnostic logging added: 13 URBs, 13 frames to mac80211, 0 drops, 11 TX
+- Frames ARE reaching ieee80211_rx_irqsafe() but mac80211 silently rejects them
+- Most likely cause: wrong `rx_status->freq` or other metadata mismatch
+- Next step: log frame type (FC) + freq + channel per frame during scan
 
 **Current Status (Feb 20, 2026 - v1.0.0):**
 - ✅ **v1.0.0:** Full mac80211 conversion
@@ -229,6 +236,15 @@ What's missing:
 - [x] Fix: chanctx ops required by kernel 6.17 mac80211
 - [x] **Monitor mode tested: tcpdump captures beacons/data/ACKs with signal**
 - [x] **Managed mode tested: iw scan finds APs with full BSS details**
+
+### Phase 25: Debug Zero Scan Results ⏳ IN PROGRESS
+- [x] Add scan diagnostic counters (URB, frame, CRC drop, len drop, TX counts)
+- [x] Instrument RX path and TX path with scan counters
+- [x] Print scan stats at scan_end
+- [x] Test result: 13 URBs, 13 frames to mac80211, 0 drops, 11 TX frames
+- [x] **FINDING:** Frames reach ieee80211_rx_irqsafe() but mac80211 discards them
+- [ ] Add per-frame logging (frame type FC + freq + channel) to identify metadata issue
+- [ ] Fix rx_status metadata so mac80211 accepts scan frames
 
 ### Phase 11: RF Calibration ✅ FUNCTIONAL (RX working!)
 - [x] Research IQK (I/Q Calibration) implementation
@@ -445,7 +461,10 @@ Running in "safe mode" with no PHY init - device stable but RX non-functional
 - ✅ v0.40: **DC cancellation removed (not supported on 8188E)**
 - ✅ v0.40.1: **IQK result application — identity values, still CCK only**
 - ✅ v1.0.0: **mac80211 conversion — monitor mode + managed mode + scanning WORKING!**
-- 🎯 Next: **AP association via wpa_supplicant + OFDM/HT rate capture**
+- ⏳ **Debugging zero scan results** — frames reach mac80211 (13/scan) but iw scan empty
+  - Scan stats: 13 URBs, 13 frames delivered, 0 CRC/len drops, 11 TX probe requests
+  - mac80211 silently discarding — likely rx_status metadata (freq?) mismatch
+- 🎯 Next: **Fix scan results → AP association via wpa_supplicant**
 
 ---
 

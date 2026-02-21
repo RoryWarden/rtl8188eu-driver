@@ -1336,6 +1336,9 @@ static void rtl8188eu_rx_complete(struct urb *urb)
 	pbuf = urb->transfer_buffer;
 	transfer_len = (s32)urb->actual_length;
 
+	if (priv->scanning)
+		priv->scan_urb_count++;
+
 	rx_desc = (struct rtl8188eu_rx_desc *)pbuf;
 	rxdw2 = le32_to_cpu(rx_desc->rxdw2);
 	pkt_cnt = (rxdw2 >> RX_DW2_PKT_CNT_SHIFT) & RX_DW2_PKT_CNT_MASK;
@@ -1355,11 +1358,17 @@ static void rtl8188eu_rx_complete(struct urb *urb)
 
 		pkt_offset = RXDESC_SIZE + drvinfo_sz + shift_sz + pkt_len;
 
-		if (pkt_len == 0 || (s32)pkt_offset > transfer_len)
+		if (pkt_len == 0 || (s32)pkt_offset > transfer_len) {
+			if (priv->scanning)
+				priv->scan_rx_drop_len++;
 			break;
+		}
 
-		if (rxdw0 & (RX_DW0_CRC32 | RX_DW0_ICV_ERR))
+		if (rxdw0 & (RX_DW0_CRC32 | RX_DW0_ICV_ERR)) {
+			if (priv->scanning)
+				priv->scan_rx_drop_crc++;
 			goto next_pkt;
+		}
 
 		/* Allocate skb for the 802.11 frame only (no radiotap — mac80211 adds it) */
 		skb = dev_alloc_skb(pkt_len);
@@ -1406,6 +1415,8 @@ static void rtl8188eu_rx_complete(struct urb *urb)
 			}
 		}
 
+		if (priv->scanning)
+			priv->scan_rx_count++;
 		ieee80211_rx_irqsafe(hw, skb);
 
 next_pkt:
@@ -1661,6 +1672,9 @@ static void rtl8188eu_mac80211_tx(struct ieee80211_hw *hw,
 
 	urb->transfer_flags |= URB_FREE_BUFFER;
 
+	if (priv->scanning)
+		priv->scan_tx_count++;
+
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
 	if (ret < 0) {
 		kfree(ctx);
@@ -1752,6 +1766,8 @@ static int rtl8188eu_mac80211_config(struct ieee80211_hw *hw,
 		struct ieee80211_channel *chan = conf->chandef.chan;
 		u8 channel = chan->hw_value;
 
+		pr_info("%s: config: channel -> %d (%d MHz)\n",
+			DRIVER_NAME, channel, chan->center_freq);
 		rtl8188eu_set_channel(priv, channel);
 
 		/* Set bandwidth */
@@ -1775,15 +1791,15 @@ static void rtl8188eu_mac80211_conf_filter(struct ieee80211_hw *hw,
 
 	priv->rx_filter = *total_flags;
 
-	/* Base RCR for station mode */
+	/* Base RCR — always include FCS (matches IEEE80211_HW_RX_INCLUDES_FCS) */
 	rcr = RCR_APM | RCR_AM | RCR_AB | RCR_AMF |
 	      RCR_APP_PHYST_RXFF | RCR_APP_ICV | RCR_APP_MIC |
-	      RCR_HTC_LOC_CTRL | RCR_ADF;
+	      RCR_HTC_LOC_CTRL | RCR_ADF | RCR_APPFCS;
 
 	/* Monitor mode or promiscuous — accept everything */
 	if ((priv->vif && priv->vif->type == NL80211_IFTYPE_MONITOR) ||
 	    (*total_flags & FIF_OTHER_BSS)) {
-		rcr |= RCR_AAP | RCR_APWRMGT | RCR_ACF | RCR_APPFCS;
+		rcr |= RCR_AAP | RCR_APWRMGT | RCR_ACF;
 	} else {
 		/* Station mode — filter by BSSID */
 		rcr |= RCR_CBSSID_DATA | RCR_CBSSID_BCN;
@@ -1881,7 +1897,15 @@ static void rtl8188eu_mac80211_scan_start(struct ieee80211_hw *hw,
 	struct rtl8188eu_priv *priv = hw->priv;
 	u32 rcr;
 
-	pr_debug("%s: Scan start\n", DRIVER_NAME);
+	pr_info("%s: Scan start\n", DRIVER_NAME);
+
+	/* Clear scan diagnostic counters */
+	priv->scan_tx_count = 0;
+	priv->scan_rx_count = 0;
+	priv->scan_rx_drop_crc = 0;
+	priv->scan_rx_drop_len = 0;
+	priv->scan_urb_count = 0;
+	priv->scanning = true;
 
 	/* Disable BSSID filtering during scan */
 	rtl8188eu_read_reg32(priv, REG_RCR, &rcr);
@@ -1894,7 +1918,10 @@ static void rtl8188eu_mac80211_scan_end(struct ieee80211_hw *hw,
 {
 	struct rtl8188eu_priv *priv = hw->priv;
 
-	pr_debug("%s: Scan complete\n", DRIVER_NAME);
+	priv->scanning = false;
+	pr_info("%s: Scan stats: %u URBs, %u frames to mac80211, %u CRC drops, %u len drops, %u TX frames\n",
+		DRIVER_NAME, priv->scan_urb_count, priv->scan_rx_count,
+		priv->scan_rx_drop_crc, priv->scan_rx_drop_len, priv->scan_tx_count);
 
 	/* Re-enable BSSID filtering if associated */
 	if (priv->vif && priv->vif->cfg.assoc) {
@@ -2044,7 +2071,7 @@ static int rtl8188eu_init_wmac_setting(struct rtl8188eu_priv *priv)
 
 	rcr = RCR_APM | RCR_AM | RCR_AB |
 	      RCR_APP_ICV | RCR_AMF | RCR_HTC_LOC_CTRL |
-	      RCR_APP_MIC | RCR_APP_PHYST_RXFF | RCR_ADF;
+	      RCR_APP_MIC | RCR_APP_PHYST_RXFF | RCR_ADF | RCR_APPFCS;
 
 	ret = rtl8188eu_write_reg32(priv, REG_RCR, rcr);
 	if (ret < 0)
@@ -2108,6 +2135,9 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 	hw->wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION) |
 				     BIT(NL80211_IFTYPE_MONITOR);
 
+	hw->wiphy->max_scan_ssids = 4;
+	hw->wiphy->max_scan_ie_len = IEEE80211_MAX_DATA_LEN;
+
 	hw->wiphy->bands[NL80211_BAND_2GHZ] = &rtl8188eu_band_2ghz;
 
 	/* Detect USB endpoints */
@@ -2118,6 +2148,13 @@ static int rtl8188eu_probe(struct usb_interface *intf,
 	/* Generate random MAC (later can read from EFUSE) */
 	eth_random_addr(priv->mac_addr);
 	SET_IEEE80211_PERM_ADDR(hw, priv->mac_addr);
+
+	/* Program MAC address into hardware for unicast filtering (REG_MACID) */
+	rtl8188eu_write_reg32(priv, 0x0610,
+		priv->mac_addr[0] | (priv->mac_addr[1] << 8) |
+		(priv->mac_addr[2] << 16) | (priv->mac_addr[3] << 24));
+	rtl8188eu_write_reg16(priv, 0x0614,
+		priv->mac_addr[4] | (priv->mac_addr[5] << 8));
 
 	pr_info("%s: MAC Address: %pM\n", DRIVER_NAME, priv->mac_addr);
 

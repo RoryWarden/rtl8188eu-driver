@@ -74,6 +74,14 @@ struct rtl8188eu_priv {
 	bool started;			/* HW started via mac80211 start() */
 	bool disconnecting;		/* Set during rmmod/disconnect */
 	unsigned int rx_filter;		/* Current FIF_* filter flags */
+
+	/* Scan diagnostics */
+	bool scanning;
+	unsigned int scan_tx_count;
+	unsigned int scan_rx_count;
+	unsigned int scan_rx_drop_crc;
+	unsigned int scan_rx_drop_len;
+	unsigned int scan_urb_count;
 };
 
 #endif /* RTL8188EU_H */
