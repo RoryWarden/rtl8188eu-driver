@@ -1,4 +1,4 @@
-# RTL8188EU Minimal USB WiFi Driver
+# RTL8188EU USB WiFi Driver
 
 > **This driver is under active development and is not ready for general use.**
 > It may crash your kernel, disconnect your USB device, or behave unpredictably.
@@ -6,28 +6,41 @@
 
 ## What Works
 
-- USB device detection and firmware download
-- Network interface creation (monitor mode only)
-- TX path (packet transmission)
-- Continuous RX (packet reception — 10+ packets/session)
-- PHY/RF initialization with IQK calibration
-- Clean module load/unload (no kernel panics)
+- **mac80211/cfg80211 integration** — proper Linux wireless subsystem driver
+- **Station mode (managed)** — `iw scan` finds APs with full BSS details (HT caps, RSN, WPS, etc.)
+- **Monitor mode** — tcpdump/Wireshark capture with radiotap headers
+- **Scanning** — channel hopping across channels 1-14, probe requests + beacon/probe response RX
+- **TX path** — mac80211 queue selection (VO/VI/BE/BK/MGMT), rate control feedback
+- **RX path** — ieee80211_rx_status with signal, rate, encoding, boottime_ns
+- **Signal strength** — realistic range (-4 to -92 dBm) via AGC gain parsing
+- **Rate parsing** — CCK, OFDM, and HT MCS rates from RX descriptors
+- **HT20/HT40 bandwidth** — BB + RF configuration for both modes
+- **minstrel_ht rate control** — selected automatically by mac80211
+- **Software crypto** — mac80211 handles WPA2 (set_key returns -EOPNOTSUPP)
+- **PHY/RF initialization** — full BB/AGC/RF table loading with IQK + LC calibration
+- **USB firmware download** — 8051 MCU firmware with H2C initialization
+- **Clean module load/unload** — no kernel panics, proper disconnect handling
 
 ## What Doesn't Work Yet
 
-- Station mode (no connecting to WiFi networks)
-- Channel hopping (fixed to channel 6)
-- Packet capture with monitor mode tools
-- Hardware encryption
-- Power management
+- AP association (connect to AP via wpa_supplicant) — not yet tested
+- WPA supplicant integration — not yet tested
+- OFDM/HT packet capture (currently only CCK 1.0 Mb/s observed in monitor mode)
+- Packet injection (TX in monitor mode)
+- Hardware encryption (using software crypto via mac80211)
+- Power management (sleep/wake, dynamic PS)
+- A-MPDU / A-MSDU aggregation
+- AP mode / SoftAP
+- Suspend/resume
+- LED control
 
 ## Overview
 
-A from-scratch Linux kernel driver for the Realtek RTL8188EU USB WiFi adapter (TP-Link TL-WN722N v2/v3). Implements monitor mode with continuous packet reception.
+A from-scratch Linux kernel driver for the Realtek RTL8188EU USB WiFi adapter (TP-Link TL-WN722N v2/v3). Built on the mac80211 wireless subsystem with station mode scanning and monitor mode packet capture.
 
-**Version:** v0.35 (Feb 18, 2026)
+**Version:** v1.0.0 (Feb 26, 2026)
 **Target:** USB ID 2357:010c, Kernel 6.17+
-**Status:** Under development — continuous RX working, monitor mode packet capture not yet verified
+**Status:** Scanning works (16+ APs found), association testing next
 
 ## Driver Architecture
 
@@ -35,7 +48,7 @@ A from-scratch Linux kernel driver for the Realtek RTL8188EU USB WiFi adapter (T
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `rtl8188eu_minimal_main.c` | ~3100 | Main driver: USB, netdev, init, TX/RX |
+| `rtl8188eu_minimal_main.c` | ~3300 | Main driver: USB, mac80211 ops, init, TX/RX |
 | `rtl8188eu_phy.c` | ~1200 | PHY register access, calibration (IQK/LC) |
 | `rtl8188eu_phy.h` | | PHY function declarations |
 | `rtl8188eu_phy_tables.c` | ~350 | BB/AGC/RF config tables |
@@ -45,13 +58,13 @@ A from-scratch Linux kernel driver for the Realtek RTL8188EU USB WiFi adapter (T
 
 ### Core Components
 
-**USB Interface** — Probe/disconnect, bulk endpoints (IN 0x81, OUT 0x02), URB management, control transfers for register access.
+**mac80211 Interface** — ieee80211_ops with start/stop, add/remove_interface, config, configure_filter, bss_info_changed, sw_scan_start/complete, tx, set_key. Channel context emulation for kernel 6.17+.
 
-**Network Interface** — Standard netdev with TX/RX paths, statistics, interface lifecycle. Monitor mode auto-enabled on open.
+**USB Interface** — Probe/disconnect, bulk endpoints (IN 0x81, OUT 0x02), URB management, control transfers for register access.
 
 **PHY/RF Layer** — BB register read/write (direct USB), RF register read/write (3-wire LSSI serial with 100us readback), IQK and LC calibration.
 
-**Configuration Tables** — PHY_REG (192 pairs), AGC_TAB (276 entries filtered from 552), RadioA (95 pairs). Conditional parsing skips PCI/SDIO-only entries.
+**Configuration Tables** — PHY_REG (192 pairs), AGC_TAB (258 entries), RadioA (91 pairs). Conditional parsing skips PCI/SDIO-only entries.
 
 ---
 
@@ -109,25 +122,25 @@ A from-scratch Linux kernel driver for the Realtek RTL8188EU USB WiFi adapter (T
 | REG_USB_SPECIAL_OPTION | 0xFE55 | 8-bit | USB bulk transfer config |
 | REG_USB_DMA_AGG_TO | 0xFE5B | 8-bit | USB DMA aggregation timeout (0x04) |
 
-### Receive Configuration (Monitor Mode)
+### Receive Configuration
 | Register | Address | Size | Purpose |
 |----------|---------|------|---------|
 | REG_RCR | 0x0608 | 32-bit | Receive Configuration Register |
-| REG_MAR | 0x0620 | 64-bit | Multicast filter (0xFFFFFFFF x2 for monitor) |
+| REG_MAR | 0x0620 | 64-bit | Multicast filter (0xFFFFFFFF x2 for all) |
 | REG_RXFLTMAP2 | 0x06A4 | 16-bit | RX filter map (0xFFFF = all frame types) |
 | REG_WMAC_TRXPTCL_CTL | 0x0668 | 32-bit | TX/RX protocol control (ACK disable) |
 
 **RCR bit definitions:**
 | Bit | Name | Purpose |
 |-----|------|---------|
-| 0 | RCR_AAP | Accept All unicast Packets (THE monitor mode bit) |
+| 0 | RCR_AAP | Accept All unicast Packets (monitor mode / unassociated) |
 | 1 | RCR_APM | Accept Physical Match |
 | 2 | RCR_AM | Accept Multicast |
 | 3 | RCR_AB | Accept Broadcast |
 | 4 | RCR_ADD3 | Accept address 3 match |
 | 5 | RCR_APWRMGT | Accept power management |
-| 6 | RCR_CBSSID_DATA | Check BSSID match (Data) — remove for monitor |
-| 7 | RCR_CBSSID_BCN | Check BSSID match (Beacon) — remove for monitor |
+| 6 | RCR_CBSSID_DATA | Check BSSID match (Data) — only when associated |
+| 7 | RCR_CBSSID_BCN | Check BSSID match (Beacon) — only when associated |
 | 8 | RCR_ACRC32 | Accept CRC32 errors |
 | 9 | RCR_AICV | Accept ICV errors |
 | 12 | RCR_ACF | Accept Control Frames |
@@ -137,7 +150,7 @@ A from-scratch Linux kernel driver for the Realtek RTL8188EU USB WiFi adapter (T
 | 29 | RCR_APP_ICV | Retain ICV |
 | 30 | RCR_APP_MIC | Retain MIC |
 
-**Monitor mode RCR:** 0xF000392F (AAP+APM+AM+AB+ACF+AMF+ACRC32+APP_PHYST+APP_ICV+APP_MIC)
+**RCR filtering logic:** BSSID filtering (CBSSID_DATA + CBSSID_BCN) is only enabled when associated to an AP. When unassociated, scanning, or in monitor mode, all frames are accepted. This prevents the hardware from silently dropping beacons/probe responses needed for scanning.
 
 ### Bluetooth Coexistence
 | Register | Address | Size | Purpose |
@@ -230,12 +243,11 @@ RF registers are NOT directly accessible. They use a baseband-mediated 3-wire se
 7. Run IQK calibration (TX+RX, save/restore 29 registers)
 8. Run LC calibration (save/restore RF_AC)
 
-### 4. MAC Configuration
-1. Set RCR for monitor mode (0xF000392F)
-2. Enable MAC TX/RX (REG_CR)
-3. Configure TX queues and boundaries
-4. Enable interrupts (HIMR = 0x503)
-5. Set RXFLTMAP2 = 0xFFFF
+### 4. mac80211 Registration
+1. ieee80211_alloc_hw with ieee80211_ops
+2. Set hardware flags (RX_INCLUDES_FCS, SIGNAL_DBM, HAS_RATE_CONTROL, etc.)
+3. Define 2.4GHz band with CCK + OFDM rates and HT MCS 0-7
+4. ieee80211_register_hw
 
 ### 5. USB Aggregation (Critical for RX!)
 1. RXDMA_AGG_PG_TH = 0x30 (48 pages) — wrong value breaks RX completely
@@ -283,9 +295,8 @@ cd /home/matthew/rtl8188eu_new
 make clean && make
 ```
 
-**Load (sudo):**
+**Load:**
 ```bash
-sudo rmmod rtl8xxxu
 sudo rmmod rtl8188eu_minimal
 sudo insmod ./rtl8188eu_minimal.ko
 ```
@@ -293,9 +304,17 @@ sudo insmod ./rtl8188eu_minimal.ko
 **Check:**
 ```bash
 dmesg | tail -80
-ip link show | grep enx
+ip link show | grep wlx
 ip -s link show <interface>
 ```
+
+**Scan:**
+```bash
+sudo ip link set <interface> up
+sudo iw dev <interface> scan
+```
+
+**Note:** `rtl8xxxu` is blacklisted via `/etc/modprobe.d/blacklist-rtl8xxxu.conf` to prevent it from claiming the device. Interface names use the `wlx` prefix (wireless) since the mac80211 conversion.
 
 ---
 
@@ -303,8 +322,7 @@ ip -s link show <interface>
 1. **Firmware Ready:** Wait for WINTINI_RDY after activation (~2ms)
 2. **RF Readback:** 100us delay after LSSI read edge trigger (10us is too short!)
 3. **PHY Stabilization:** 50ms delay after PHY init
-4. **Channel Switch:** 3 attempts with 10ms delays
-5. **URB Submission:** Must use GFP_ATOMIC in callback context
+4. **URB Submission:** Must use GFP_ATOMIC in callback context
 
 ## Key Discoveries
 1. **Conditional Tables:** PHY tables contain IF/ELSE blocks — loading PCI/SDIO entries crashes USB device
@@ -314,20 +332,24 @@ ip -s link show <interface>
 5. **RF Readback Delay:** 100us required, 10us returns stale data
 6. **URB_FREE_BUFFER:** Cannot manually kfree() a buffer that has this flag — double-free panic
 7. **rmmod Race:** Must set disconnecting flag + netif_device_detach() before cleanup
+8. **BSSID Filtering:** Must only enable RCR_CBSSID_DATA/BCN when associated — enabling when unassociated blocks ALL frames including beacons needed for scanning
+9. **boottime_ns:** rx_status->boottime_ns must be set on RX frames or cfg80211 BSS cache treats them as expired
 
 ## Known Limitations
-1. **Monitor Mode Only** — No station/AP mode (no mac80211/cfg80211)
-2. **Fixed Channel 6** — No channel hopping
-3. **No Encryption** — Hardware crypto not configured
-4. **No Radiotap Headers** — monitor mode tools need these
-5. **No Rate Control** — Fixed data rate
-6. **No Power Save** — Always active
-7. **LC Cal Readback** — RF reads 0x00000 inside calibration (doesn't affect RX)
+1. **No Association Yet** — scanning works, but wpa_supplicant connection not tested
+2. **CCK Only in Monitor Mode** — only 1.0 Mb/s CCK packets captured (no OFDM/HT)
+3. **No Hardware Encryption** — using software crypto via mac80211
+4. **No Power Save** — always active
+5. **No Packet Injection** — TX in monitor mode not implemented
+6. **No Aggregation** — A-MPDU / A-MSDU not implemented
+7. **No AP Mode** — station and monitor only
 
 ## Development History
 
 | Version | Date | Change |
 |---------|------|--------|
+| v1.0.0+ | Feb 26 | **Fix scan: BSSID filtering + boottime_ns — 16+ APs found!** |
+| v1.0.0 | Feb 20 | **mac80211 conversion — managed + monitor mode, scanning** |
 | v0.40.1 | Feb 19 | Fix IQK result application to compensation registers (OFDM RX) |
 | v0.40 | Feb 19 | DC offset cancellation attempt (removed — not supported on 8188E) |
 | v0.39.1 | Feb 19 | Fix crystal cap (CX_IN/CX_OUT match) |
