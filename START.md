@@ -1,6 +1,6 @@
 # RTL8188EU Driver - Quick Start & Progress
 
-**Last Updated:** Feb 21, 2026
+**Last Updated:** Feb 26, 2026
 **Current Version:** v1.0.0 (mac80211 conversion — managed + monitor mode)
 **Previous Version:** v0.40.1 (IQK result application to compensation registers)
 
@@ -13,6 +13,7 @@
 - ✅ **mac80211/cfg80211 integration** — replaces custom netdev/wext
 - ✅ **Monitor mode** — tcpdump capture with radiotap headers via mac80211
 - ✅ **Managed mode** — scanning finds APs with full BSS details (HT caps, RSN, etc.)
+- ✅ **rtl8xxxu blacklisted** — `/etc/modprobe.d/blacklist-rtl8xxxu.conf` prevents auto-loading
 - ✅ **minstrel_ht rate control** — selected automatically by mac80211
 - ✅ TX path with mac80211 queue selection + rate control feedback
 - ✅ RX path with ieee80211_rx_status (signal, rate, encoding)
@@ -24,17 +25,15 @@
 - ✅ Software crypto (set_key returns -EOPNOTSUPP)
 
 **What doesn't work yet:**
-- ❌ `iw scan` returns 0 results despite frames reaching mac80211 (see Phase 25)
 - ❌ Only seeing CCK 1.0 Mb/s packets (no OFDM/HT captured yet)
 - ❌ No AP association tested yet
 - ❌ No WPA supplicant tested
 - ❌ No packet injection
 
-**Current investigation (Feb 21, 2026):**
-- Scan diagnostic logging added: 13 URBs, 13 frames to mac80211, 0 drops, 11 TX
-- Frames ARE reaching ieee80211_rx_irqsafe() but mac80211 silently rejects them
-- Most likely cause: wrong `rx_status->freq` or other metadata mismatch
-- Next step: log frame type (FC) + freq + channel per frame during scan
+**Fixed (Feb 26, 2026) — Scan now returns APs:**
+- **Root cause 1:** `configure_filter` re-enabled BSSID filtering during scan, overriding `scan_start`'s disable. Fix: skip BSSID filtering when `priv->scanning` is true.
+- **Root cause 2:** `rx_status->boottime_ns` was never set (stayed 0 from memset). Fix: set `ktime_get_boottime_ns()` on all RX frames.
+- Result: `iw scan` now finds 16+ APs across all channels
 
 **Current Status (Feb 20, 2026 - v1.0.0):**
 - ✅ **v1.0.0:** Full mac80211 conversion
@@ -237,14 +236,18 @@ What's missing:
 - [x] **Monitor mode tested: tcpdump captures beacons/data/ACKs with signal**
 - [x] **Managed mode tested: iw scan finds APs with full BSS details**
 
-### Phase 25: Debug Zero Scan Results ⏳ IN PROGRESS
+### Phase 25: Fix Zero Scan Results ✅ COMPLETE
 - [x] Add scan diagnostic counters (URB, frame, CRC drop, len drop, TX counts)
 - [x] Instrument RX path and TX path with scan counters
 - [x] Print scan stats at scan_end
 - [x] Test result: 13 URBs, 13 frames to mac80211, 0 drops, 11 TX frames
 - [x] **FINDING:** Frames reach ieee80211_rx_irqsafe() but mac80211 discards them
-- [ ] Add per-frame logging (frame type FC + freq + channel) to identify metadata issue
-- [ ] Fix rx_status metadata so mac80211 accepts scan frames
+- [x] Add per-frame logging (frame type FC + freq + channel) during scan
+- [x] Set `rx_status->boottime_ns = ktime_get_boottime_ns()` on all RX frames
+- [x] **FIX:** `configure_filter` was re-enabling BSSID filtering during scan (0 URBs)
+- [x] Added `priv->scanning` check to skip BSSID filtering in `configure_filter`
+- [x] **Blacklisted rtl8xxxu** — `/etc/modprobe.d/blacklist-rtl8xxxu.conf`
+- [x] **RESULT: `iw scan` finds 16+ APs with full BSS details!**
 
 ### Phase 11: RF Calibration ✅ FUNCTIONAL (RX working!)
 - [x] Research IQK (I/Q Calibration) implementation
@@ -336,13 +339,15 @@ What's missing:
 ```bash
 cd /home/matthew/rtl8188eu_new
 make clean && make
-sudo rmmod rtl8xxxu
 sudo rmmod rtl8188eu_minimal
 sudo insmod ./rtl8188eu_minimal.ko
 dmesg | tail -80
-ip link show | grep enx
+ip link show | grep wlx
 ip -s link show <interface_name>
 ```
+
+**Note:** `rtl8xxxu` is blacklisted via `/etc/modprobe.d/blacklist-rtl8xxxu.conf`.
+Interface name uses `wlx` prefix (wireless, not `enx` ethernet) since mac80211 conversion.
 
 ---
 
@@ -461,10 +466,8 @@ Running in "safe mode" with no PHY init - device stable but RX non-functional
 - ✅ v0.40: **DC cancellation removed (not supported on 8188E)**
 - ✅ v0.40.1: **IQK result application — identity values, still CCK only**
 - ✅ v1.0.0: **mac80211 conversion — monitor mode + managed mode + scanning WORKING!**
-- ⏳ **Debugging zero scan results** — frames reach mac80211 (13/scan) but iw scan empty
-  - Scan stats: 13 URBs, 13 frames delivered, 0 CRC/len drops, 11 TX probe requests
-  - mac80211 silently discarding — likely rx_status metadata (freq?) mismatch
-- 🎯 Next: **Fix scan results → AP association via wpa_supplicant**
+- ✅ **Scan fixed** — configure_filter BSSID race + boottime_ns — 16+ APs found
+- 🎯 Next: **Remove diagnostic logging → AP association via wpa_supplicant**
 
 ---
 

@@ -75,6 +75,9 @@ struct rtl8188eu_priv {
 	bool disconnecting;		/* Set during rmmod/disconnect */
 	unsigned int rx_filter;		/* Current FIF_* filter flags */
 
+	/* RX diagnostics */
+	unsigned int rx_callback_total;
+
 	/* Scan diagnostics */
 	bool scanning;
 	unsigned int scan_tx_count;

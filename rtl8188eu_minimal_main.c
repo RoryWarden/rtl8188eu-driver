@@ -1313,10 +1313,15 @@ static void rtl8188eu_rx_complete(struct urb *urb)
 	hw = priv->hw;
 
 	rx_callback_count++;
+	priv->rx_callback_total++;
 
 	if (rx_callback_count <= 3)
 		pr_info("%s: RX callback #%u: status=%d, len=%d\n",
 			DRIVER_NAME, rx_callback_count, urb->status, urb->actual_length);
+
+	/* Count ALL URB completions during scan (before any filtering) */
+	if (priv->scanning)
+		priv->scan_urb_count++;
 
 	if (urb->status != 0) {
 		switch (urb->status) {
@@ -1335,9 +1340,6 @@ static void rtl8188eu_rx_complete(struct urb *urb)
 
 	pbuf = urb->transfer_buffer;
 	transfer_len = (s32)urb->actual_length;
-
-	if (priv->scanning)
-		priv->scan_urb_count++;
 
 	rx_desc = (struct rtl8188eu_rx_desc *)pbuf;
 	rxdw2 = le32_to_cpu(rx_desc->rxdw2);
@@ -1380,6 +1382,7 @@ static void rtl8188eu_rx_complete(struct urb *urb)
 		/* Fill ieee80211_rx_status via SKB control buffer */
 		rx_status = IEEE80211_SKB_RXCB(skb);
 		memset(rx_status, 0, sizeof(*rx_status));
+		rx_status->boottime_ns = ktime_get_boottime_ns();
 
 		rx_status->freq = rtl8188eu_chan_to_freq(priv->channel);
 		rx_status->band = NL80211_BAND_2GHZ;
@@ -1415,8 +1418,31 @@ static void rtl8188eu_rx_complete(struct urb *urb)
 			}
 		}
 
-		if (priv->scanning)
+		if (priv->scanning) {
 			priv->scan_rx_count++;
+			{
+				u8 *frame = skb->data;
+				u16 fc = frame[0] | (frame[1] << 8);
+				u16 ftype = fc & 0x00fc;
+				const char *type_str = "other";
+
+				if (ftype == 0x0080)
+					type_str = "BEACON";
+				else if (ftype == 0x0050)
+					type_str = "PROBE_RESP";
+				else if (ftype == 0x0040)
+					type_str = "PROBE_REQ";
+				else if ((fc & 0x000c) == 0x0008)
+					type_str = "data";
+				else if ((fc & 0x000c) == 0x0004)
+					type_str = "ctrl";
+
+				pr_info("%s: SCAN RX #%u: FC=0x%04x [%s] freq=%d ch=%d len=%u\n",
+					DRIVER_NAME, priv->scan_rx_count,
+					fc, type_str, rx_status->freq,
+					priv->channel, pkt_len);
+			}
+		}
 		ieee80211_rx_irqsafe(hw, skb);
 
 next_pkt:
@@ -1432,7 +1458,7 @@ next_pkt:
 		}
 	} while (transfer_len > 0 && pkt_cnt > 0);
 
-	if ((rx_callback_count % 1000) == 0)
+	if ((rx_callback_count % 100) == 0)
 		pr_info("%s: RX stats: %u callbacks\n", DRIVER_NAME, rx_callback_count);
 
 resubmit:
@@ -1796,12 +1822,12 @@ static void rtl8188eu_mac80211_conf_filter(struct ieee80211_hw *hw,
 	      RCR_APP_PHYST_RXFF | RCR_APP_ICV | RCR_APP_MIC |
 	      RCR_HTC_LOC_CTRL | RCR_ADF | RCR_APPFCS;
 
-	/* Monitor mode or promiscuous — accept everything */
+	/* Monitor mode, promiscuous, or scanning — accept everything */
 	if ((priv->vif && priv->vif->type == NL80211_IFTYPE_MONITOR) ||
-	    (*total_flags & FIF_OTHER_BSS)) {
+	    (*total_flags & FIF_OTHER_BSS) || priv->scanning) {
 		rcr |= RCR_AAP | RCR_APWRMGT | RCR_ACF;
-	} else {
-		/* Station mode — filter by BSSID */
+	} else if (priv->vif && priv->vif->cfg.assoc) {
+		/* Station mode associated — filter by BSSID to reduce traffic */
 		rcr |= RCR_CBSSID_DATA | RCR_CBSSID_BCN;
 	}
 
@@ -1897,7 +1923,8 @@ static void rtl8188eu_mac80211_scan_start(struct ieee80211_hw *hw,
 	struct rtl8188eu_priv *priv = hw->priv;
 	u32 rcr;
 
-	pr_info("%s: Scan start\n", DRIVER_NAME);
+	pr_info("%s: Scan start (total RX callbacks so far: %u)\n",
+		DRIVER_NAME, priv->rx_callback_total);
 
 	/* Clear scan diagnostic counters */
 	priv->scan_tx_count = 0;
